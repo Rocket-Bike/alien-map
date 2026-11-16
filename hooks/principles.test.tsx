@@ -251,7 +251,7 @@ test('principle 3: a frame of the terminal picture stays within its budget, at r
   const at = 1_033_000
   const figures: string[] = []
   for (const [name, board] of [['at rest', { entries: [], counts: {} } as Board], ['at work', busy()]] as const) {
-    const svg = drawMap(board, at, PLAIN)
+    const svg = drawMap(board, at, PLAIN, true)
     const reading = timed(15, () => { parseMap(svg) })
     const scene = parseMap(svg)
     const scale = scaleFor(scene, SCALE)

@@ -93,7 +93,7 @@ export async function drawPicture($: EngineInterface, e: RenderInputOf<'Pane', '
   await settleScheme($, picture)
   const { setup } = picture
   const { Image } = $.ui.resolve(e)
-  const scene = parseMap(drawMap(board, now, setup))
+  const scene = parseMap(drawMap(board, now, setup, true))
   // Rows per column that keep the map round on cells `cellShape` times taller than wide.
   const perColumn = scene.height / scene.width / setup.cellShape
   const room = e.props.scroll.bodyRows - FEED_ROWS

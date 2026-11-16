@@ -243,7 +243,8 @@ test('what never moves is painted once a drawing, and the frames come out as if 
         worst = Math.max(worst, Math.abs(a - b))
         for (let c = 0; c < 3; c++) worst = Math.max(worst, Math.abs((layered[i + c] as number) * a - (direct[i + c] as number) * b) / 255)
       }
-      expect(worst).toBeLessThanOrEqual(3)
+      // Soft gradients laid down once and again differ by a step of rounding here and there.
+      expect(worst).toBeLessThanOrEqual(4)
     }
   }
 })
@@ -349,9 +350,9 @@ test('with terminalView picture, in a terminal the map is a picture above the ro
   // Sixty columns across, and as many rows as keep the map round on cells 2.4 times as tall as they are wide, as iTerm2's Monaco 12 draws them.
   expect(image?.props.columns).toBe(60)
   expect(image?.props.rows).toBe(23)
-  // A PNG, a small part of the frame's 1.8 MB of pixels.
+  // A PNG, a small part of the frame's 1.8 MB of pixels: the lit planets and ship cost more than flat colors did.
   const file = fromBase64((image?.props.source as { png: string }).png)
-  expect(file.length).toBeLessThan(200 * 1024)
+  expect(file.length).toBeLessThan(320 * 1024)
   expect(file.length).toBeLessThanOrEqual(MAX_IMAGE_BYTES)
   const { width, height, rgba } = unpng(file)
   expect([width, height]).toEqual([690, 645])

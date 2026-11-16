@@ -1,6 +1,6 @@
 {
   "name": "alien-map",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A space-themed live map beside the chat: an orange alien in a UFO sends rockets to a planet for each kind of work. Built on lot-map by Aleksei Volodin.",
   "author": {
     "name": "Michael Rarick (built on lot-map by Aleksei Volodin)"

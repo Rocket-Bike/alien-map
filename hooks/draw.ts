@@ -100,31 +100,112 @@ function seeded(seed: number): () => number {
   }
 }
 
-// ---- planets ------------------------------------------------------------------------------------
+// ---- light ------------------------------------------------------------------------------------
+//
+// The look is lit, as if rendered: every round thing has a gradient for its body, a soft dark side, a bright spot where
+// the light from the upper left strikes it, and a thin rim of light on its edge. Gradients are in the drawing's own
+// units, so they travel with what they paint.
 
-/** The part of a disc of radius 1 that the light does not reach, light coming from the upper left. Worked out once. */
-const SHADE: Point[] = (() => {
-  const L = { x: -0.38, y: -0.38 }
-  const LR = 1.14
-  const out: Point[] = []
-  const steps = 72
-  // The planet's own edge, where the light circle does not cover it, going round through the lower right.
-  const onEdge: Point[] = []
-  for (let k = 0; k <= steps; k++) {
-    const a = Math.PI / 4 - Math.PI + (2 * Math.PI * k) / steps
-    const p = { x: Math.cos(a), y: Math.sin(a) }
-    if (Math.hypot(p.x - L.x, p.y - L.y) >= LR) onEdge.push(p)
+/** A stop of a gradient: where, what color, how opaque. */
+type Stop = [number, string, number?]
+
+/** Gradients the drawing has defined so far, written once at its top. */
+let DEFS: string[] = []
+let DEFINED = new Set<string>()
+
+const stopsOf = (stops: Stop[]): string =>
+  stops.map(([o, color, a]) => `<stop offset="${Math.round(o * 1000) / 1000}" stop-color="${color}"${a !== undefined && a !== 1 ? ` stop-opacity="${Math.round(a * 1000) / 1000}"` : ''}/>`).join('')
+
+/** A gradient out from `f` (or the centre) to the circle at `c` of radius `r`, for `fill="url(#id)"`. */
+function radialDef(id: string, c: Point, r: number, stops: Stop[], f?: Point): string {
+  const focus = f === undefined ? '' : ` fx="${n1(f.x)}" fy="${n1(f.y)}"`
+  return `<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${n1(c.x)}" cy="${n1(c.y)}" r="${n1(r)}"${focus}>${stopsOf(stops)}</radialGradient>`
+}
+
+/** A gradient along the line from `a` to `b`. */
+function linearDef(id: string, a: Point, b: Point, stops: Stop[]): string {
+  return `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${n1(a.x)}" y1="${n1(a.y)}" x2="${n1(b.x)}" y2="${n1(b.y)}">${stopsOf(stops)}</linearGradient>`
+}
+
+/** Defines a gradient for the drawing and answers how a fill names it. */
+function lit(def: string, isShared = false): string {
+  const id = /id="([^"]+)"/.exec(def)?.[1] ?? ''
+  if (!DEFINED.has(id)) {
+    DEFINED.add(id)
+    ;(isShared ? SHARED : DEFS).push(def)
+    KNOWN_DEFS.set(id, [def, isShared])
   }
-  // Back along the light circle's edge, inside the planet.
-  const onLight: Point[] = []
-  for (let k = steps; k >= 0; k--) {
-    const a = Math.PI / 4 - Math.PI / 2 + (Math.PI * k) / steps
-    const p = { x: L.x + LR * Math.cos(a), y: L.y + LR * Math.sin(a) }
-    if (Math.hypot(p.x, p.y) <= 1) onLight.push(p)
+  return `url(#${id})`
+}
+
+/** A color moved towards white (f > 0) or black (f < 0). */
+function tint(hex: string, f: number): string {
+  const v = Number.parseInt(hex.slice(1), 16)
+  const to = f > 0 ? 255 : 0
+  const k = Math.abs(f)
+  const ch = (shift: number): string => Math.round(((v >> shift) & 255) + (to - ((v >> shift) & 255)) * k).toString(16).padStart(2, '0')
+  return `#${ch(16)}${ch(8)}${ch(0)}`
+}
+
+/** Gradients laid out in fractions of the shape they fill, so one serves every shape that looks alike. Written once at the top. */
+let SHARED: string[] = []
+
+/** A short id from what a gradient is, so two alike are one. */
+function hashOf(text: string): string {
+  let h = 2166136261
+  for (let k = 0; k < text.length; k++) h = Math.imul(h ^ text.charCodeAt(k), 16777619)
+  return `g${(h >>> 0).toString(36)}`
+}
+
+/** A gradient in the fractions of the box around what it fills, from the focus `f` (or the centre) out to the circle at `c`, radius `r`. */
+function boxRadial(stops: Stop[], c: [number, number] = [0.5, 0.5], r = 0.5, f?: [number, number]): string {
+  const focus = f === undefined ? '' : ` fx="${f[0]}" fy="${f[1]}"`
+  const body = `cx="${c[0]}" cy="${c[1]}" r="${r}"${focus}>${stopsOf(stops)}`
+  return share(`<radialGradient id="ID" ${body}</radialGradient>`)
+}
+
+/** A gradient in the fractions of the box around what it fills, along the line from (x1, y1) to (x2, y2). */
+function boxLinear(stops: Stop[], x1: number, y1: number, x2: number, y2: number): string {
+  return share(`<linearGradient id="ID" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">${stopsOf(stops)}</linearGradient>`)
+}
+
+function share(template: string): string {
+  const id = hashOf(template)
+  if (!DEFINED.has(id)) {
+    const def = template.replace('id="ID"', `id="${id}"`)
+    DEFINED.add(id)
+    SHARED.push(def)
+    KNOWN_DEFS.set(id, [def, true])
   }
-  out.push(...onEdge, ...onLight)
-  return out
-})()
+  return `url(#${id})`
+}
+
+/** Every gradient ever defined, by id, so a part drawn once can bring its gradients into a later drawing. */
+const KNOWN_DEFS = new Map<string, [string, boolean]>()
+
+/** Parts that look the same in every drawing (the sky, the planets), made once and kept. */
+const ONCE = new Map<string, string>()
+
+/** A part made once for `key` and kept, its gradients brought into each drawing that uses it. */
+function once(key: string, make: () => string): string {
+  let svg = ONCE.get(key)
+  if (svg === undefined) {
+    svg = make()
+    ONCE.set(key, svg)
+  }
+  for (const [, id] of svg.matchAll(/url\(#([\w-]+)\)/g)) {
+    const known = KNOWN_DEFS.get(id as string)
+    if (known === undefined || DEFINED.has(id as string)) continue
+    DEFINED.add(id as string)
+    ;(known[1] ? SHARED : DEFS).push(known[0])
+  }
+  return svg
+}
+
+/** An id safe for a gradient, from anything. */
+const idOf = (...parts: (string | number)[]): string => parts.join('-').replace(/[^\w-]/g, '_')
+
+// ---- planets ------------------------------------------------------------------------------------
 
 type Look = {
   /** The planet's own color, for its lane, its glow and its count. */
@@ -141,6 +222,8 @@ type Look = {
   ring?: { rx: number; ry: number; tilt: number; color: string; inner: string }
   /** A thin halo of air. */
   air?: string
+  /** How strongly the light shines off it, 0 to 1. */
+  gloss?: number
 }
 
 const LOOKS: Record<StationId, Look> = {
@@ -200,6 +283,7 @@ const LOOKS: Record<StationId, Look> = {
     ],
     craterColor: ['#8e321c', '#c9583a'],
     spots: [[0, -0.86, 0.34, 0.13, '#f4ede6']],
+    gloss: 0.22,
   },
   // A lava world: the shell.
   shell: {
@@ -214,6 +298,8 @@ const LOOKS: Record<StationId, Look> = {
       [0.36, -0.56, 0.1, 0.1, '#ffc266'],
       [-0.5, 0.1, 0.07, 0.07, '#ffb24d'],
     ],
+    gloss: 0.25,
+    air: '#ff7a2e',
   },
   // Saturn: the network.
   web: {
@@ -238,6 +324,7 @@ const LOOKS: Record<StationId, Look> = {
     ],
     craters: [[0.4, 0.12, 0.11]],
     craterColor: ['#b4d2e2', '#e4f3fa'],
+    gloss: 0.7,
   },
   // A violet gas giant: agents. Its moons are the subagents at work.
   agents: {
@@ -274,34 +361,59 @@ const LOOKS: Record<StationId, Look> = {
       [0.1, -0.7, 0.08],
     ],
     craterColor: ['#85858b', '#b1b1b6'],
+    gloss: 0.2,
   },
 }
 
-/** The half of a ring behind the planet or the half in front of it, as two outlines. */
-function ringHalf(p: Point, look: Look, front: boolean): string {
+/** The half of a ring behind the planet or the half in front of it: two lit bands with a gap between. */
+function ringHalf(p: Point, look: Look, front: boolean, key: string): string {
   const ring = look.ring
   if (ring === undefined) return ''
   const t = (ring.tilt * Math.PI) / 180
-  const outline = (rx: number, ry: number): Point[] => {
+  const turn = (x: number, y: number): Point => ({ x: p.x + x * Math.cos(t) - y * Math.sin(t), y: p.y + x * Math.sin(t) + y * Math.cos(t) })
+  const half = (k: number): Point[] => {
     const pts: Point[] = []
-    for (let k = 0; k <= 24; k++) {
-      const a = (front ? 0 : Math.PI) + (Math.PI * k) / 24
-      const x = rx * NODE * Math.cos(a)
-      const y = ry * NODE * Math.sin(a)
-      pts.push({ x: p.x + x * Math.cos(t) - y * Math.sin(t), y: p.y + x * Math.sin(t) + y * Math.cos(t) })
+    for (let j = 0; j <= 28; j++) {
+      const a = (front ? 0 : Math.PI) + (Math.PI * j) / 28
+      pts.push(turn(ring.rx * NODE * k * Math.cos(a), ring.ry * NODE * k * Math.sin(a)))
     }
     return pts
   }
-  return (
-    `<path d="${poly(outline(ring.rx, ring.ry), false)}" fill="none" stroke="${ring.color}" stroke-width="3" opacity="${front ? '.95' : '.7'}"/>` +
-    `<path d="${poly(outline(ring.rx * 0.8, ring.ry * 0.8), false)}" fill="none" stroke="${ring.inner}" stroke-width=".9" opacity="${front ? '.9' : '.6'}"/>`
+  // Lit across its length: bright where it faces the light, darker at its far end and on the back half.
+  const ends = [turn(-ring.rx * NODE, 0), turn(ring.rx * NODE, 0)] as const
+  const fill = lit(
+    linearDef(idOf('ring', key, front ? 'f' : 'b', Math.round(p.x), Math.round(p.y)), ends[0], ends[1], [
+      [0, tint(ring.color, 0.35)],
+      [0.45, ring.color],
+      [1, tint(ring.color, front ? -0.45 : -0.6)],
+    ]),
   )
+  const band = (outer: number, inner: number, opacity: number): string =>
+    `<path d="${poly([...half(outer), ...half(inner).reverse()])}" fill="${fill}" opacity="${opacity}"/>`
+  return band(1, 0.84, front ? 0.95 : 0.75) + band(0.8, 0.64, front ? 0.6 : 0.45)
 }
 
-/** A planet: its disc, what lies on it, and its night side. Its ring's back half is drawn by the caller, before it. */
-function planet(p: Point, look: Look): string {
-  const u = (x: number, y: number): Point => ({ x: p.x + x * NODE, y: p.y + y * NODE })
-  let out = `<circle cx="${n1(p.x)}" cy="${n1(p.y)}" r="${NODE}" fill="${look.base}"/>`
+/** A planet, lit: its glow of air, its disc and what lies on it, then light and shade over it all. Its ring's back half is drawn by the caller, before it. */
+function planet(p: Point, look: Look, key: string): { glow: string; body: string } {
+  const R = NODE
+  const u = (x: number, y: number): Point => ({ x: p.x + x * R, y: p.y + y * R })
+  // A halo of air, faint for most, stronger for the planets that have air.
+  const air = look.air ?? look.accent
+  const glow = `<circle cx="${n1(p.x)}" cy="${n1(p.y)}" r="${n1(R * 1.5)}" fill="${boxRadial([
+    [0.6, air, 0],
+    [0.68, air, look.air !== undefined ? 0.45 : 0.22],
+    [1, air, 0],
+  ])}"/>`
+  // The disc itself is lit from the upper left: lighter there, deeper at the far edge.
+  let out = `<circle cx="${n1(p.x)}" cy="${n1(p.y)}" r="${R}" fill="${boxRadial(
+    [
+      [0, tint(look.base, 0.18)],
+      [0.55, look.base],
+      [1, tint(look.base, -0.35)],
+    ],
+    [0.35, 0.325],
+    0.725,
+  )}"/>`
   for (const [y1, y2, color, opacity] of look.bands ?? []) {
     // A band runs edge to edge: its outline follows the disc's own edge between its two heights.
     const side = (y: number): number => Math.sqrt(Math.max(0, 1 - y * y))
@@ -323,47 +435,78 @@ function planet(p: Point, look: Look): string {
     const [dark, light] = look.craterColor ?? ['#000000', '#ffffff']
     const c = u(x, y)
     out +=
-      `<circle cx="${n1(c.x)}" cy="${n1(c.y)}" r="${n1(r * NODE)}" fill="${dark}"/>` +
-      `<circle cx="${n1(c.x - r * NODE * 0.22)}" cy="${n1(c.y - r * NODE * 0.22)}" r="${n1(r * NODE * 0.62)}" fill="${light}"/>`
+      `<circle cx="${n1(c.x)}" cy="${n1(c.y)}" r="${n1(r * R)}" fill="${dark}"/>` +
+      `<circle cx="${n1(c.x - r * R * 0.22)}" cy="${n1(c.y - r * R * 0.22)}" r="${n1(r * R * 0.62)}" fill="${light}"/>`
   }
   for (const [pts, color, width] of look.cracks ?? []) {
     out += `<path d="${poly(pts.map(([x, y]) => u(x, y)), false)}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round"/>`
   }
   for (const [x, y, rx, ry, color, opacity] of look.spots ?? []) {
     const c = u(x, y)
-    out += `<ellipse cx="${n1(c.x)}" cy="${n1(c.y)}" rx="${n1(rx * NODE)}" ry="${n1(ry * NODE)}" fill="${color}"${opacity !== undefined ? ` opacity="${opacity}"` : ''}/>`
+    out += `<ellipse cx="${n1(c.x)}" cy="${n1(c.y)}" rx="${n1(rx * R)}" ry="${n1(ry * R)}" fill="${color}"${opacity !== undefined ? ` opacity="${opacity}"` : ''}/>`
   }
-  out += `<path d="${poly(SHADE.map(s => u(s.x, s.y)))}" fill="#000000" opacity=".5"/>`
-  if (look.air !== undefined) out += `<circle cx="${n1(p.x)}" cy="${n1(p.y)}" r="${NODE + 1.2}" fill="none" stroke="${look.air}" stroke-width="1.2" opacity=".35"/>`
-  return out
+  // Over it all, the light: a night side deepening to the far edge, a thin rim of light, and a soft bright spot where it strikes.
+  const disc = `cx="${n1(p.x)}" cy="${n1(p.y)}" r="${R}"`
+  out += `<circle ${disc} fill="${boxRadial(
+    [
+      [0.42, '#000000', 0.04],
+      [0.68, '#000000', 0.36],
+      [0.88, '#000000', 0.68],
+      [1, '#000000', 0.8],
+    ],
+    [0.34, 0.31],
+    0.75,
+  )}"/>`
+  out += `<circle ${disc} fill="${boxRadial([
+    [0.84, air, 0],
+    [0.96, tint(air, 0.3), 0.45],
+    [1, tint(air, 0.3), 0.15],
+  ])}"/>`
+  const gloss = look.gloss ?? 0.42
+  out += `<circle ${disc} fill="${boxRadial(
+    [
+      [0, '#ffffff', gloss],
+      [0.35, '#ffffff', gloss * 0.4],
+      [1, '#ffffff', 0],
+    ],
+    [0.31, 0.28],
+    0.31,
+  )}"/>`
+  return { glow, body: out }
 }
 
 // ---- rockets ------------------------------------------------------------------------------------
 
-/** A rocket pointing along `u`, its parts drawn around the origin, for animateMotion to carry. */
-function rocketParts(u: Point, nose: string, isHurt: boolean): { d: string; fill: string; isFlame?: boolean }[] {
-  const at = (a: number, s: number): Point => ({ x: a * u.x - s * u.y, y: a * u.y + s * u.x })
-  const shape = (pts: [number, number][]): string => poly(pts.map(([a, s]) => at(a, s)))
+/**
+ * A rocket's parts drawn pointing right around the origin, lit round its body, with a glass port and a hot flame. A
+ * rocket is these turned to its heading: one set of gradients serves every rocket with the same nose.
+ */
+function rocketParts(nose: string, isHurt: boolean): { d: string; fill: string; isFlame?: boolean }[] {
+  const shape = (pts: [number, number][]): string => poly(pts.map(([x, y]) => ({ x, y })))
+  const hull = isHurt ? '#e8654f' : '#e8ecf8'
+  const across = (stops: Stop[], w = 2.6): string => lit(linearDef(hashOf(`rk${w}${JSON.stringify(stops)}`), { x: 0, y: -w }, { x: 0, y: w }, stops), true)
   return [
-    { d: shape([[-6, 1.5], [-11.5, 0], [-6, -1.5]]), fill: '#ffb347', isFlame: true },
-    { d: shape([[-3, 2.3], [-7.2, 5], [-6, 2.3]]), fill: SKIN.main },
-    { d: shape([[-3, -2.3], [-7.2, -5], [-6, -2.3]]), fill: SKIN.main },
-    { d: shape([[8, 0], [4, 2.5], [-5, 2.5], [-6.2, 0], [-5, -2.5], [4, -2.5]]), fill: isHurt ? '#e8654f' : '#e8ecf8' },
-    { d: shape([[8, 0], [4.4, 2.3], [4.4, -2.3]]), fill: nose },
-    { d: shape([[1.9, 0], [1.1, 1.1], [-0.2, 1.1], [-0.9, 0], [-0.2, -1.1], [1.1, -1.1]]), fill: '#2b5fc4' },
+    { d: shape([[-6, 1.6], [-12.5, 0], [-6, -1.6]]), fill: lit(linearDef('rk-flame', { x: -6, y: 0 }, { x: -12.5, y: 0 }, [[0, '#fff7d6'], [0.3, '#ffc35a'], [0.7, '#ff7a2e', 0.85], [1, '#ff4a1a', 0]]), true), isFlame: true },
+    { d: shape([[-3, 2.3], [-7.2, 5], [-6, 2.3]]), fill: across([[0, tint(SKIN.main, 0.25)], [1, tint(SKIN.main, -0.4)]], 5) },
+    { d: shape([[-3, -2.3], [-7.2, -5], [-6, -2.3]]), fill: across([[0, tint(SKIN.main, 0.25)], [1, tint(SKIN.main, -0.4)]], 5) },
+    { d: shape([[8, 0], [4, 2.5], [-5, 2.5], [-6.2, 0], [-5, -2.5], [4, -2.5]]), fill: across([[0, '#ffffff'], [0.3, hull], [0.75, tint(hull, -0.3)], [1, tint(hull, -0.6)]]) },
+    { d: shape([[8, 0], [4.4, 2.3], [4.4, -2.3]]), fill: across([[0, tint(nose, 0.45)], [0.4, nose], [1, tint(nose, -0.5)]], 2.3) },
+    { d: shape([[1.9, 0], [1.1, 1.1], [-0.2, 1.1], [-0.9, 0], [-0.2, -1.1], [1.1, -1.1]]), fill: lit(radialDef('rk-port', { x: 0.5, y: 0 }, 1.7, [[0, '#d6edff'], [0.35, '#4f8fe0'], [1, '#173a7a']], { x: 1, y: -0.5 }), true) },
   ]
 }
+
+const headingOf = (u: Point): string => n1((Math.atan2(u.y, u.x) * 180) / Math.PI)
 
 /** A rocket on its way from `a` to `b`, `age` ms into a trip of ROCKET_MS. */
 function rocket(a: Point, b: Point, nose: string, age: number, isHurt: boolean): string {
   const d = Math.hypot(b.x - a.x, b.y - a.y) || 1
-  const u = { x: (b.x - a.x) / d, y: (b.y - a.y) / d }
+  const turn = `transform="rotate(${headingOf({ x: (b.x - a.x) / d, y: (b.y - a.y) / d })})"`
   const timing = `begin="${clock(-age)}" dur="${clock(ROCKET_MS)}" fill="freeze"`
   const motion = `<animateMotion path="M${n1(a.x)} ${n1(a.y)}L${n1(b.x)} ${n1(b.y)}" ${timing}/>`
-  return rocketParts(u, nose, isHurt)
+  return rocketParts(nose, isHurt)
     .map(
       part =>
-        `<path d="${part.d}" fill="${part.fill}" opacity="0">${motion}` +
+        `<path ${turn} d="${part.d}" fill="${part.fill}" opacity="0">${motion}` +
         (part.isFlame
           ? `<animate attributeName="opacity" values=".95;.45;.95;.45;.95;.45;.9;0" keyTimes="0;.14;.28;.42;.56;.7;.88;1" ${timing}/>`
           : `<animate attributeName="opacity" values="1;1;0" keyTimes="0;.9;1" ${timing}/>`) +
@@ -377,9 +520,9 @@ function docked(p: Point, toward: Point, nose: string): string {
   const d = Math.hypot(toward.x - p.x, toward.y - p.y) || 1
   const u = { x: (p.x - toward.x) / d, y: (p.y - toward.y) / d }
   const spot = { x: p.x - u.x * (NODE + 8), y: p.y - u.y * (NODE + 8) }
-  return rocketParts(u, nose, false)
+  return rocketParts(nose, false)
     .filter(part => !part.isFlame)
-    .map(part => `<path transform="translate(${n1(spot.x)} ${n1(spot.y)})" d="${part.d}" fill="${part.fill}"/>`)
+    .map(part => `<path transform="translate(${n1(spot.x)} ${n1(spot.y)}) rotate(${headingOf(u)})" d="${part.d}" fill="${part.fill}"/>`)
     .join('')
 }
 
@@ -473,13 +616,20 @@ function station(s: (typeof STATIONS)[number], i: number, { entries, board, now,
   const fade = isAlarm ? alarmAge : since
   const span = isAlarm ? ALARM_MS : GLOW_MS
 
-  let under = ''
+  const shape = { glow: once(`glow:${s.id}:${shift}`, () => planet(p, look, s.id).glow), body: once(`planet:${s.id}:${shift}`, () => ringHalf(p, look, false, s.id) + planet(p, look, s.id).body + ringHalf(p, look, true, s.id)) }
+  let under = shape.glow
   if (isLit || isAlarm) {
+    // A soft light around the planet while it works, fading after.
+    const halo = boxRadial([
+      [0, color, 0.75],
+      [0.55, color, 0.5],
+      [1, color, 0],
+    ])
     under +=
       running.length > 0 && !isAlarm
-        ? `<circle cx="${x}" cy="${y}" r="${NODE + 11}" fill="${color}" opacity=".14"/>`
-        : `<circle cx="${x}" cy="${y}" r="${NODE + 11}" fill="${color}" opacity="0">` +
-          `<animate attributeName="opacity" values=".28;0" begin="${clock(-fade)}" dur="${clock(span)}" fill="freeze"/></circle>`
+        ? `<circle cx="${x}" cy="${y}" r="${NODE + 16}" fill="${halo}" opacity=".55"/>`
+        : `<circle cx="${x}" cy="${y}" r="${NODE + 16}" fill="${halo}" opacity="0">` +
+          `<animate attributeName="opacity" values=".9;0" begin="${clock(-fade)}" dur="${clock(span)}" fill="freeze"/></circle>`
   }
   if (running.length > 0) {
     const elapsed = now - Math.min(...running.map(e => e.startedAt))
@@ -497,7 +647,7 @@ function station(s: (typeof STATIONS)[number], i: number, { entries, board, now,
     under += hand(NODE + 5, 2, 60_000, false) + hand(NODE + 9, 1.1, 600_000, true)
   }
 
-  const body = ringHalf(p, look, false) + planet(p, look) + ringHalf(p, look, true)
+  const body = shape.body
 
   // The words stand on a rim of the space's own color, so a line that passes behind them never strikes them through.
   const rimmed = `paint-order="stroke" stroke="${SPACE}" stroke-width="3.5" stroke-linejoin="round"`
@@ -572,13 +722,23 @@ function windowed(svg: string, from: number, until: number): string {
 /** The alien's face, in its UFO. Glances and expressions crossfade by opacity on clocks that carry on between drawings. */
 function pilot(mood: Mood, now: number, isStill: boolean, targets: Point[]): string {
   const head = { x: CX, y: CY - 8 }
+  // The head is lit from the upper left like everything else; lids and blinks share its gradient.
+  const HEAD = lit(radialDef('alien-head', { x: head.x - 5, y: head.y - 6 }, 24, [[0, '#ffb592'], [0.4, '#e6835f'], [0.75, '#c75f3e'], [1, '#8f3d24']]))
   const eyes = [{ x: CX - 6.2, y: CY - 9.5 }, { x: CX + 6.2, y: CY - 9.5 }]
   const toward = (p: Point, reach: number): Point => {
     const a = Math.atan2(p.y - CY, p.x - CX)
     return { x: Math.cos(a) * reach, y: Math.sin(a) * reach * 0.85 }
   }
+  const PUPIL = lit(radialDef('alien-pupil', { x: CX, y: CY - 10 }, 8, [[0, '#4a3550'], [1, SKIN.pupil]]))
+  // A pupil and the glint on it move together.
   const pupils = (off: Point, opacity: string, anim = ''): string =>
-    eyes.map(e => `<circle cx="${n1(e.x + off.x)}" cy="${n1(e.y + off.y)}" r="2.2" fill="${SKIN.pupil}" opacity="${opacity}">${anim}</circle>`).join('')
+    eyes
+      .map(
+        e =>
+          `<circle cx="${n1(e.x + off.x)}" cy="${n1(e.y + off.y)}" r="2.3" fill="${PUPIL}" opacity="${opacity}">${anim}</circle>` +
+          `<circle cx="${n1(e.x + off.x - 0.8)}" cy="${n1(e.y + off.y - 0.9)}" r=".8" fill="#ffffff" opacity="${opacity === '0' ? '0' : '.95'}">${anim}</circle>`,
+      )
+      .join('')
   type Brow = [number, number, number, number]
   const brows = (left: Brow, right: Brow, opacity: string, anim = ''): string =>
     [left, right]
@@ -604,19 +764,27 @@ function pilot(mood: Mood, now: number, isStill: boolean, targets: Point[]): str
   // Antennae with glowing tips, then the head: always there, awake or asleep.
   for (const side of [-1, 1]) {
     const tip = { x: CX + side * 9, y: CY - 25 }
-    out += `<line x1="${n1(CX + side * 4)}" y1="${n1(CY - 18)}" x2="${n1(tip.x)}" y2="${n1(tip.y)}" stroke="${SKIN.main}" stroke-width="1.6" stroke-linecap="round"/>`
-    out += `<circle cx="${n1(tip.x)}" cy="${n1(tip.y)}" r="2.6" fill="${SKIN.tip}"/>`
+    out += `<line x1="${n1(CX + side * 4)}" y1="${n1(CY - 18)}" x2="${n1(tip.x)}" y2="${n1(tip.y)}" stroke="${SKIN.shade}" stroke-width="1.8" stroke-linecap="round"/>`
     if (!isStill) {
+      const halo = boxRadial([[0, SKIN.tip, 0.8], [1, SKIN.tip, 0]])
       const pulse = `begin="${clock(-((now + (side + 1) * 350) % 1800))}" dur="1.8s" repeatCount="indefinite"`
-      out += `<circle cx="${n1(tip.x)}" cy="${n1(tip.y)}" r="2.6" fill="${SKIN.tip}" opacity=".4"><animate attributeName="r" values="2.6;5;2.6" ${pulse}/><animate attributeName="opacity" values=".45;0;.45" ${pulse}/></circle>`
+      out += `<circle cx="${n1(tip.x)}" cy="${n1(tip.y)}" r="5.5" fill="${halo}" opacity=".5"><animate attributeName="opacity" values=".8;.15;.8" ${pulse}/></circle>`
     }
+    out += `<circle cx="${n1(tip.x)}" cy="${n1(tip.y)}" r="2.8" fill="${boxRadial([[0, '#fff3e6'], [0.45, SKIN.tip], [1, '#b44e2c']], [0.5, 0.5], 0.5, [0.34, 0.32])}"/>`
   }
-  out += `<ellipse cx="${CX}" cy="${CY + 4}" rx="11" ry="8" fill="${SKIN.shade}"/>`
-  out += `<ellipse cx="${head.x}" cy="${head.y}" rx="16" ry="13.5" fill="${SKIN.main}"/>`
-  out += `<ellipse cx="${head.x - 5}" cy="${head.y - 6}" rx="6" ry="3" fill="${SKIN.tip}" opacity=".35"/>`
+  out += `<ellipse cx="${CX}" cy="${CY + 4}" rx="11" ry="8" fill="${lit(radialDef('alien-body', { x: CX - 3, y: CY }, 13, [[0, SKIN.main], [1, '#6e2f1c']]))}"/>`
+  out += `<ellipse cx="${head.x}" cy="${head.y}" rx="16" ry="13.5" fill="${HEAD}"/>`
+  // A soft shine on the crown and a blush on each cheek.
+  out += `<ellipse cx="${head.x - 5}" cy="${head.y - 6.5}" rx="7" ry="4" fill="${lit(radialDef('alien-shine', { x: head.x - 5, y: head.y - 7 }, 7, [[0, '#ffffff', 0.55], [1, '#ffffff', 0]]))}"/>`
+  for (const side of [-1, 1]) {
+    const cheek = { x: CX + side * 11, y: CY - 3 }
+    out += `<ellipse cx="${n1(cheek.x)}" cy="${n1(cheek.y)}" rx="3.6" ry="2.4" fill="${boxRadial([[0, '#ff8f7a', 0.55], [1, '#ff8f7a', 0]])}"/>`
+  }
 
   // Awake: the eyes, and where they go.
-  let awake = eyes.map(e => `<ellipse cx="${n1(e.x)}" cy="${n1(e.y)}" rx="4.4" ry="5.2" fill="${SKIN.eye}"/>`).join('')
+  let awake = eyes
+    .map(e => `<ellipse cx="${n1(e.x)}" cy="${n1(e.y)}" rx="4.4" ry="5.2" fill="${boxRadial([[0, '#ffffff'], [0.7, SKIN.eye], [1, '#c9b4a6']], [0.5, 0.5], 0.6, [0.34, 0.33])}"/>`)
+    .join('')
   const lookAbout = !isStill && mood.focus === undefined && passing <= 0 && !mood.isWorried
   if (mood.focus !== undefined) {
     awake += pupils(toward(mood.focus, 1.9), '1')
@@ -651,11 +819,11 @@ function pilot(mood: Mood, now: number, isStill: boolean, targets: Point[]): str
   // Blinks: the lids close for a moment every few seconds.
   if (!isStill) {
     const blink = `begin="${clock(-(now % 4300))}" dur="4.3s" repeatCount="indefinite"`
-    awake += eyes.map(e => `<ellipse cx="${n1(e.x)}" cy="${n1(e.y)}" rx="4.8" ry="5.6" fill="${SKIN.main}" opacity="0"><animate attributeName="opacity" values="0;0;1;0" keyTimes="0;.95;.975;1" ${blink}/></ellipse>`).join('')
+    awake += eyes.map(e => `<ellipse cx="${n1(e.x)}" cy="${n1(e.y)}" rx="4.8" ry="5.6" fill="${HEAD}" opacity="0"><animate attributeName="opacity" values="0;0;1;0" keyTimes="0;.95;.975;1" ${blink}/></ellipse>`).join('')
   }
   if (mood.isWorried) {
     // Heavy lids over the top of each eye.
-    awake += eyes.map(e => `<path d="M${n1(e.x - 4.6)} ${n1(e.y - 1.6)}Q${n1(e.x)} ${n1(e.y - 7.2)} ${n1(e.x + 4.6)} ${n1(e.y - 1.6)}Z" fill="${SKIN.main}"/>`).join('')
+    awake += eyes.map(e => `<path d="M${n1(e.x - 4.6)} ${n1(e.y - 1.6)}Q${n1(e.x)} ${n1(e.y - 7.2)} ${n1(e.x + 4.6)} ${n1(e.y - 1.6)}Z" fill="${HEAD}"/>`).join('')
   }
   out += windowed(awake, 0, napAt)
 
@@ -700,36 +868,64 @@ function pilot(mood: Mood, now: number, isStill: boolean, targets: Point[]): str
 /** Set by drawMap for the pilot's words: the palette of the drawing being made. */
 let c0: Palette = DARK
 
-/** The UFO: glass, the pilot inside, the saucer over the pilot's middle, and lights round the rim. */
+/** The UFO: glass, the pilot inside, the saucer over the pilot's middle, and lights round the rim. All of it lit. */
 function ship(mood: Mood, now: number, isStill: boolean, isBusy: boolean, core: string, targets: Point[], c: Palette): string {
+  const dome = { x: CX, y: CY + 6 }
+  // The dome is the part of a ball of glass above the deck, as an outline of points: the ship keeps to M, L, Q and Z.
+  const cap: Point[] = []
+  const base = Math.asin((DECK.y - dome.y) / 30)
+  for (let k = 0; k <= 32; k++) {
+    const a = Math.PI - base + ((Math.PI + 2 * base) * k) / 32
+    cap.push({ x: dome.x + 30 * Math.cos(a), y: dome.y + 30 * Math.sin(a) })
+  }
+  const glass = poly(cap)
   let out = ''
-  // The glass behind the pilot.
-  out += `<circle cx="${CX}" cy="${CY + 6}" r="30" fill="#14233f" opacity=".85"/>`
+  // A soft glow under the saucer, from its engines.
+  out += `<ellipse cx="${CX}" cy="${CY + 27}" rx="40" ry="9" fill="${lit(radialDef('ufo-engine', { x: CX, y: CY + 27 }, 40, [[0, '#7fe0d3', isBusy ? 0.55 : 0.35], [1, '#7fe0d3', 0]]))}"/>`
+  // The glass behind the pilot: deep at the middle, lighter towards its edge.
+  out += `<path d="${glass}" fill="${lit(radialDef('ufo-glass-back', dome, 30, [[0, '#0d1830'], [0.75, '#16274a'], [1, '#2a4473']]))}"/>`
   out += pilot(mood, now, isStill, targets)
-  // The glass in front: a faint tint and a curved glint.
-  out += `<circle cx="${CX}" cy="${CY + 6}" r="30" fill="#9fd4ff" opacity=".08"/>`
-  out += `<path d="M${CX - 22} ${CY - 6}Q${CX - 17} ${CY - 19} ${CX - 6} ${CY - 22}" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" opacity=".4"/>`
-  out += `<circle cx="${CX}" cy="${CY + 6}" r="30" fill="none" stroke="#c7e6ff" stroke-width="1" opacity=".45"/>`
-  // The saucer: hull, deck and its band.
-  out += `<ellipse cx="${CX}" cy="${CY + 19}" rx="34" ry="7.5" fill="#596276"/>`
-  out += `<ellipse cx="${DECK.x}" cy="${DECK.y}" rx="${DECK.rx}" ry="${DECK.ry}" fill="#a4adc2"/>`
-  out += `<ellipse cx="${DECK.x}" cy="${DECK.y - 2.5}" rx="${DECK.rx - 8}" ry="${DECK.ry - 4}" fill="#c3cad9"/>`
-  out += `<ellipse cx="${DECK.x}" cy="${DECK.y}" rx="${DECK.rx}" ry="${DECK.ry}" fill="none" stroke="#6f788c" stroke-width="1"/>`
+  // The glass in front: clear in the middle, catching light at its edge, with a long glint and a small one.
+  out += `<path d="${glass}" fill="${lit(radialDef('ufo-glass', dome, 30, [[0, '#bfe3ff', 0], [0.7, '#bfe3ff', 0.05], [0.9, '#d6eeff', 0.24], [1, '#eef8ff', 0.5]]))}"/>`
+  out += `<path d="${poly(cap, false)}" fill="none" stroke="#d6eeff" stroke-width=".9" opacity=".5"/>`
+  out += `<path d="M${CX - 23} ${CY - 4}Q${CX - 19} ${CY - 18} ${CX - 7} ${CY - 22.5}" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" opacity=".55"/>`
+  out += `<circle cx="${CX + 15}" cy="${CY - 15}" r="1.6" fill="#ffffff" opacity=".6"/>`
+  // The saucer: a dark hull underneath, a brushed metal deck with its light top, and a band round the edge.
+  out += `<ellipse cx="${CX}" cy="${CY + 19}" rx="34" ry="7.5" fill="${lit(linearDef('ufo-hull', { x: CX, y: CY + 12 }, { x: CX, y: CY + 27 }, [[0, '#8a93a8'], [0.5, '#4a5266'], [1, '#22273a']]))}"/>`
+  out += `<ellipse cx="${DECK.x}" cy="${DECK.y}" rx="${DECK.rx}" ry="${DECK.ry}" fill="${lit(
+    linearDef('ufo-deck', { x: CX - DECK.rx, y: DECK.y }, { x: CX + DECK.rx, y: DECK.y }, [
+      [0, '#4d566a'],
+      [0.14, '#aeb7c9'],
+      [0.3, '#7d879c'],
+      [0.46, '#eef1f7'],
+      [0.6, '#a2acc0'],
+      [0.8, '#d3d9e5'],
+      [1, '#4d566a'],
+    ]),
+  )}"/>`
+  out += `<ellipse cx="${DECK.x}" cy="${DECK.y}" rx="${DECK.rx}" ry="${DECK.ry}" fill="${lit(linearDef('ufo-deck-shade', { x: CX, y: DECK.y - DECK.ry }, { x: CX, y: DECK.y + DECK.ry }, [[0, '#ffffff', 0.3], [0.45, '#ffffff', 0], [1, '#000000', 0.45]]))}"/>`
+  out += `<ellipse cx="${DECK.x}" cy="${DECK.y - 2.5}" rx="${DECK.rx - 8}" ry="${DECK.ry - 4}" fill="${lit(linearDef('ufo-top', { x: CX - DECK.rx + 8, y: DECK.y - 6 }, { x: CX + DECK.rx - 8, y: DECK.y + 1 }, [[0, '#9aa4b8'], [0.35, '#f4f6fb'], [0.7, '#c5ccda'], [1, '#7d879c']]))}"/>`
+  out += `<ellipse cx="${DECK.x}" cy="${DECK.y}" rx="${DECK.rx}" ry="${DECK.ry}" fill="none" stroke="#3b4254" stroke-width="1"/>`
+  out += `<path d="M${CX - 46} ${DECK.y + 4.5}Q${CX} ${DECK.y + 11} ${CX + 46} ${DECK.y + 4.5}" fill="none" stroke="#ffffff" stroke-width=".8" stroke-linecap="round" opacity=".35"/>`
   // Its name along the front of the deck.
   out += `<text x="${CX}" y="${CY + 16.5}" text-anchor="middle" ${FONT} font-size="6.5" letter-spacing="1.2" fill="#3b4254">${escapeXml(core)}</text>`
-  // Lights round the rim: they chase while work runs and glow softly at rest.
+  // Lights round the rim, each a glowing bead with a halo: they chase while work runs and glow softly at rest.
   const LIGHTS = 9
   const lap = isBusy ? 1200 : 3600
   for (let k = 0; k < LIGHTS; k++) {
     const a = Math.PI * 0.08 + (Math.PI * 0.84 * k) / (LIGHTS - 1)
-    const lx = DECK.x - DECK.rx * 0.9 * Math.cos(a)
-    const ly = DECK.y + DECK.ry * 0.62 * Math.sin(a) + 1
+    const at = { x: DECK.x - DECK.rx * 0.9 * Math.cos(a), y: DECK.y + DECK.ry * 0.62 * Math.sin(a) + 1 }
     const hue = k % 3 === 0 ? SKIN.main : k % 3 === 1 ? '#ffd166' : '#7fe0d3'
+    const halo = `fill="${boxRadial([[0, hue, 0.7], [1, hue, 0]])}"`
+    const bead = `fill="${boxRadial([[0, '#ffffff'], [0.45, hue], [1, tint(hue, -0.35)]], [0.5, 0.5], 0.5, [0.37, 0.34])}"`
+    const where = `cx="${n1(at.x)}" cy="${n1(at.y)}"`
     if (isStill) {
-      out += `<circle cx="${n1(lx)}" cy="${n1(ly)}" r="1.7" fill="${hue}" opacity=".85"/>`
+      out += `<circle ${where} r="4.2" ${halo} opacity=".5"/><circle ${where} r="1.9" ${bead}/>`
     } else {
       const chase = `begin="${clock(-((now + (k * lap) / LIGHTS) % lap))}" dur="${clock(lap)}" repeatCount="indefinite"`
-      out += `<circle cx="${n1(lx)}" cy="${n1(ly)}" r="1.7" fill="${hue}" opacity=".35"><animate attributeName="opacity" values="1;.25;.25;1" keyTimes="0;.3;.85;1" ${chase}/></circle>`
+      out +=
+        `<circle ${where} r="4.2" ${halo} opacity=".2"><animate attributeName="opacity" values="1;.1;.1;1" keyTimes="0;.3;.85;1" ${chase}/></circle>` +
+        `<circle ${where} r="1.9" ${bead} opacity=".5"><animate attributeName="opacity" values="1;.45;.45;1" keyTimes="0;.3;.85;1" ${chase}/></circle>`
     }
   }
   // The pilot's bubble: ? while it waits on you, ! for a while after something went wrong.
@@ -769,8 +965,8 @@ function enlarged(svg: string): string {
     })
   }
   return svg
-    .replace(/ (cx|x|x1|x2)="(-?[\d.]+)"/g, (_, a: string, v: string) => ` ${a}="${px(v)}"`)
-    .replace(/ (cy|y|y1|y2)="(-?[\d.]+)"/g, (_, a: string, v: string) => ` ${a}="${py(v)}"`)
+    .replace(/ (cx|fx|x|x1|x2)="(-?[\d.]+)"/g, (_, a: string, v: string) => ` ${a}="${px(v)}"`)
+    .replace(/ (cy|fy|y|y1|y2)="(-?[\d.]+)"/g, (_, a: string, v: string) => ` ${a}="${py(v)}"`)
     .replace(/ (r|rx|ry|stroke-width|font-size|letter-spacing)="(-?[\d.]+)"/g, (_, a: string, v: string) => ` ${a}="${n1(Number(v) * k)}"`)
     .replace(/ (d|path)="([^"]*)"/g, (_, a: string, d: string) => ` ${a}="${pairs(d)}"`)
     .replace(/attributeName="r" values="([^"]*)"/g, (_, v: string) => `attributeName="r" values="${v.split(';').map(x => n1(Number(x) * k)).join(';')}"`)
@@ -779,10 +975,17 @@ function enlarged(svg: string): string {
 
 // ---- the whole map ------------------------------------------------------------------------------
 
-export function drawMap(board: Board, now: number, setup: Setup): string {
+/**
+ * The map as one SVG. `forPicture` is for the terminal's painted picture: the sky behind is drawn plain there, since
+ * a sky of soft gradients the size of the whole picture packs into a PNG several times larger.
+ */
+export function drawMap(board: Board, now: number, setup: Setup, forPicture = false): string {
   // Space is dark whatever the theme; a person's own colors still take the places they name.
   const c: Palette = { ...DARK, ...setup.colors }
   c0 = c
+  DEFS = []
+  SHARED = []
+  DEFINED = new Set()
   const shift = setup.layout === 'you-bottom' ? STATIONS.length / 2 : 0
   const recent = board.entries.slice(-40)
   const isStill = setup.motion === 'reduced'
@@ -796,26 +999,57 @@ export function drawMap(board: Board, now: number, setup: Setup): string {
   const targets = STATIONS.map((_, i) => place(i, shift))
 
   let body = ''
-  if (setup.background !== 'transparent') {
-    const isOwnGround = c.ground !== DARK.ground
-    body += `<rect width="${W}" height="${H}" rx="12" fill="${isOwnGround ? c.ground : SPACE}"/>`
-    // Two faint clouds of gas far behind everything; a ground of the person's own is left plain.
-    if (!isOwnGround) body += `<circle cx="96" cy="88" r="92" fill="#3a2a7a" opacity=".16"/><circle cx="380" cy="350" r="110" fill="#1d4a6e" opacity=".16"/>`
-  }
-
-  // Stars: the same every drawing, a few of them twinkling.
+  const isOwnGround = c.ground !== DARK.ground
+  body += once(`sky:${setup.background}:${forPicture}:${isOwnGround ? c.ground : ''}`, () => {
+    let sky = ''
+    if (setup.background !== 'transparent') {
+      sky += `<rect width="${W}" height="${H}" rx="12" fill="${isOwnGround ? c.ground : SPACE}"/>`
+      // Deep space: a little lighter in the middle, and clouds of gas far behind everything. A ground of the person's own is left plain.
+      const nebula: [number, number, number, string, number][] = [
+        [96, 88, 120, '#5b3fb0', 0.32],
+        [392, 352, 140, '#1f6c8f', 0.3],
+        [410, 70, 80, '#a0407a', 0.16],
+      ]
+      if (!isOwnGround && forPicture) {
+        nebula.forEach(([x, y, r, color, a]) => {
+          sky += `<circle cx="${x}" cy="${y}" r="${n1(r * 0.7)}" fill="${color}" opacity="${n1(a * 0.45)}"/>`
+        })
+      } else if (!isOwnGround) {
+        sky += `<rect width="${W}" height="${H}" rx="12" fill="${boxRadial([[0, '#15204a', 0.85], [0.55, '#0b1230', 0.4], [1, SPACE, 0]], [0.5, 0.49], 0.72)}"/>`
+        nebula.forEach(([x, y, r, color, a]) => {
+          sky += `<circle cx="${x}" cy="${y}" r="${r}" fill="${boxRadial([[0, color, a], [0.5, color, a * 0.45], [1, color, 0]])}"/>`
+        })
+      }
+    }
+    // Stars that keep still, the same every drawing; now and then a nearer one with a glow round it.
+    const rnd = seeded(20261115)
+    for (let k = 0; k < 80; k++) {
+      const sx = rnd() * W
+      const sy = rnd() * H
+      const r = 0.35 + rnd() * 0.9
+      const o = 0.25 + rnd() * 0.6
+      if (k % 7 === 0) continue
+      if (k % 9 === 4) {
+        if (!forPicture) sky += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="5" fill="${boxRadial([[0, '#cfe2ff', 0.6], [1, '#cfe2ff', 0]])}"/>`
+        sky += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="${n1(r + 0.4)}" fill="#ffffff"/>`
+      } else sky += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="${n1(r)}" fill="#ffffff" opacity="${n1(o)}"/>`
+    }
+    return sky
+  })
+  // The stars that twinkle, all together after the still ones.
   const rnd = seeded(20261115)
   for (let k = 0; k < 80; k++) {
     const sx = rnd() * W
     const sy = rnd() * H
     const r = 0.35 + rnd() * 0.9
     const o = 0.25 + rnd() * 0.6
-    if (k % 7 === 0 && !isStill) {
-      const dur = 2200 + Math.floor(rnd() * 3000)
-      body += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="${n1(r + 0.25)}" fill="#ffffff" opacity="${n1(o)}"><animate attributeName="opacity" values="${n1(o)};.08;${n1(o)}" begin="${clock(-(now % dur))}" dur="${clock(dur)}" repeatCount="indefinite"/></circle>`
-    } else {
-      body += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="${n1(r)}" fill="#ffffff" opacity="${n1(o)}"/>`
+    if (k % 7 !== 0) continue
+    if (isStill) {
+      body += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="${n1(r + 0.25)}" fill="#ffffff" opacity="${n1(o)}"/>`
+      continue
     }
+    const dur = 2200 + ((k * 7919) % 3000)
+    body += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="${n1(r + 0.25)}" fill="#ffffff" opacity="${n1(o)}"><animate attributeName="opacity" values="${n1(o)};.08;${n1(o)}" begin="${clock(-(now % dur))}" dur="${clock(dur)}" repeatCount="indefinite"/></circle>`
   }
 
   // Lanes from the ship to each planet, worn in with use: by the end of a session the map shows where the work went.
@@ -883,7 +1117,8 @@ export function drawMap(board: Board, now: number, setup: Setup): string {
   crew.forEach((_, k) => {
     const lap = 7000
     const spin = `${n1(agentsAt.x)} ${n1(agentsAt.y)}`
-    const moon = `<circle cx="${n1(agentsAt.x)}" cy="${n1(agentsAt.y - NODE - 7)}" r="3.2" fill="#d9d4e6"/>`
+    const spot = { x: agentsAt.x, y: agentsAt.y - NODE - 7 }
+    const moon = `<circle cx="${n1(spot.x)}" cy="${n1(spot.y)}" r="3.4" fill="${boxRadial([[0, '#ffffff'], [0.5, '#c9c3d8'], [1, '#5d5670']], [0.5, 0.5], 0.62, [0.32, 0.31])}\"/>`
     if (isStill) {
       body += `<g transform="rotate(${n1((360 * k) / crew.length)} ${spin})">${moon}</g>`
       return
@@ -916,7 +1151,12 @@ export function drawMap(board: Board, now: number, setup: Setup): string {
     napAt: !anyRunning && lastAt !== undefined ? lastAt + NAP_MS - now : Infinity,
     focus: focusOn === undefined ? undefined : place(indexOf(focusOn.station), shift),
   }
-  body += enlarged(ship(mood, now, isStill, anyRunning, setup.core, targets, c))
+  // The ship's gradients are drawn at its own size with it, then scaled up together.
+  const outside = DEFS
+  DEFS = []
+  const craft = ship(mood, now, isStill, anyRunning, setup.core, targets, c)
+  body += enlarged(`<defs>${DEFS.join('')}</defs>${craft}`)
+  DEFS = outside
 
   const switchAge = board.switchedAt === undefined ? Infinity : now - board.switchedAt
   const isSwitching = switchAge >= 0 && switchAge < SWITCH_MS
@@ -947,7 +1187,7 @@ export function drawMap(board: Board, now: number, setup: Setup): string {
   }
 
   // Twice the viewBox, so the picture fills whatever room the pane gives it.
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W * 2}" height="${H * 2}">${body}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W * 2}" height="${H * 2}"><defs>${[...SHARED].sort().join('')}${[...DEFS].sort().join('')}</defs>${body}</svg>`
 }
 
 function escapeXml(text: string): string {

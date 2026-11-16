@@ -32,12 +32,26 @@ type Shape = {
   runs: Run[]
   /** A path's outline, read once. */
   subs?: Sub[]
+  /** The gradient its fill names, when it names one. */
+  gradient?: Gradient
+}
+
+/**
+ * A fill that changes color across a shape: along a line, or out from a focus to a circle. Its places are in the
+ * shape's own units with gradientUnits="userSpaceOnUse", else fractions of the box around the shape, as SVG has it.
+ */
+export type Gradient = {
+  kind: 'linear' | 'radial'
+  attrs: Record<string, string>
+  stops: { offset: number; color: Rgb; opacity: number }[]
 }
 
 export type Scene = {
   width: number
   height: number
   shapes: Shape[]
+  /** The gradients the drawing defines, by id. */
+  gradients: Record<string, Gradient>
   /** What the reader met and cannot paint: an element, an attribute or a value. Empty for every drawing drawMap makes. */
   unknown: string[]
 }
@@ -57,7 +71,13 @@ const KNOWN: Readonly<Record<string, readonly string[]>> = {
   animate: ['attributeName', 'values', 'keyTimes', 'begin', 'dur', 'fill', 'repeatCount'],
   animateMotion: ['path', 'begin', 'dur', 'fill', 'repeatCount'],
   animateTransform: ['attributeName', 'type', 'from', 'to', 'begin', 'dur', 'fill', 'repeatCount'],
+  defs: [],
+  linearGradient: ['id', 'gradientUnits', 'x1', 'y1', 'x2', 'y2'],
+  radialGradient: ['id', 'gradientUnits', 'cx', 'cy', 'r', 'fx', 'fy'],
+  stop: ['offset', 'stop-color', 'stop-opacity'],
 }
+/** How a fill names a gradient. */
+const URL = /^url\(#([\w-]+)\)$/
 const ANIMATED = new Set(['opacity', 'r', 'stroke-dashoffset'])
 const COLORED = ['fill', 'stroke']
 
@@ -109,12 +129,12 @@ function animation(tag: string, attrs: Record<string, string>, flag: (what: stri
 
 /** Reads a drawing made by drawMap. Anything it cannot paint lands in `unknown` and is otherwise left out. */
 export function parseMap(svg: string): Scene {
-  const scene: Scene = { width: 0, height: 0, shapes: [], unknown: [] }
+  const scene: Scene = { width: 0, height: 0, shapes: [], gradients: {}, unknown: [] }
   const flag = (what: string): undefined => {
     if (!scene.unknown.includes(what)) scene.unknown.push(what)
     return undefined
   }
-  type Open = { tag: string; shape?: Shape; group?: Group; fill?: string }
+  type Open = { tag: string; shape?: Shape; group?: Group; fill?: string; gradient?: Gradient }
   const stack: Open[] = []
   let inStyle = false
 
@@ -145,7 +165,10 @@ export function parseMap(svg: string): Scene {
     // On an animation `fill` says whether it holds its last value, not a color.
     for (const name of tag.startsWith('animate') ? [] : COLORED) {
       const v = attrs[name]
-      if (v !== undefined && v !== 'none' && colorOf(v) === undefined) flag(`${tag} ${name}=${v}`)
+      if (v === undefined || v === 'none' || colorOf(v) !== undefined) continue
+      // A shape may fill with a gradient; a stroke may not.
+      if (name === 'fill' && URL.test(v) && tag !== 'text' && tag !== 'tspan') continue
+      flag(`${tag} ${name}=${v}`)
     }
     if (attrs.transform !== undefined && transformOf(attrs.transform) === undefined) flag(`transform ${attrs.transform}`)
     if (attrs['stroke-linecap'] !== undefined && !['butt', 'round'].includes(attrs['stroke-linecap'])) flag(`stroke-linecap ${attrs['stroke-linecap']}`)
@@ -162,6 +185,25 @@ export function parseMap(svg: string): Scene {
       case 'style':
         inStyle = selfClosing !== '/'
         break
+      case 'defs':
+        pushed = { tag }
+        break
+      case 'linearGradient':
+      case 'radialGradient': {
+        if (attrs.gradientUnits !== undefined && attrs.gradientUnits !== 'userSpaceOnUse' && attrs.gradientUnits !== 'objectBoundingBox') flag(`${tag} gradientUnits=${attrs.gradientUnits}`)
+        const gradient: Gradient = { kind: tag === 'linearGradient' ? 'linear' : 'radial', attrs, stops: [] }
+        if (attrs.id !== undefined) scene.gradients[attrs.id] = gradient
+        pushed = { tag, gradient }
+        break
+      }
+      case 'stop': {
+        const owner = stack[stack.length - 1]?.gradient
+        const color = colorOf(attrs['stop-color'])
+        if (owner === undefined) flag('stop outside a gradient')
+        else if (color === undefined) flag(`stop-color ${attrs['stop-color']}`)
+        else owner.stops.push({ offset: num(attrs.offset, 0), color, opacity: num(attrs['stop-opacity'], 1) })
+        break
+      }
       case 'g':
         pushed = { tag, group: { matrix: transformOf(attrs.transform) ?? IDENTITY, turns: [] } }
         break
@@ -192,6 +234,13 @@ export function parseMap(svg: string): Scene {
       }
     }
     if (pushed !== undefined && selfClosing !== '/') stack.push(pushed)
+  }
+  // A fill names its gradient by id, wherever in the drawing that is defined.
+  for (const shape of scene.shapes) {
+    const id = URL.exec(shape.attrs.fill ?? '')?.[1]
+    if (id === undefined) continue
+    shape.gradient = scene.gradients[id]
+    if (shape.gradient === undefined) flag(`gradient #${id} undefined`)
   }
   // A later begin takes over from an earlier one; the sort keeps document order between equals.
   for (const shape of scene.shapes) shape.animations.sort((a, b) => a.begin - b.begin)
@@ -596,6 +645,26 @@ class Canvas {
     return [x0, y0, x1, y1]
   }
 
+  /**
+   * Lays a gradient over the canvas through the mask, then clears the mask: `where` answers how far along the gradient
+   * a pixel lies, 0 to 1, and `table` holds its color and opacity at 256 steps.
+   */
+  compositeBy(where: (x: number, y: number) => number, table: Float32Array, opacity: number): void {
+    const { mask, rgba, width } = this
+    for (let y = this.y0; y <= this.y1; y++) {
+      for (let x = this.x0; x <= this.x1; x++) {
+        const i = y * width + x
+        const c = mask[i] as number
+        if (c <= 0) continue
+        mask[i] = 0
+        const k = Math.round(Math.min(1, Math.max(0, where(x + 0.5, y + 0.5))) * 255) * 4
+        blend(rgba, i * 4, table[k] as number, table[k + 1] as number, table[k + 2] as number, c * opacity * (table[k + 3] as number))
+      }
+    }
+    this.x1 = this.x0 - 1
+    this.y1 = this.y0 - 1
+  }
+
   /** Lays one color over the canvas through the mask, then clears the mask. */
   composite([r, g, b]: Rgb, opacity: number): void {
     const { mask, rgba, width } = this
@@ -812,6 +881,90 @@ function turnOf(turns: readonly Animation[], t: number): Matrix | undefined {
   return turn
 }
 
+/** A gradient's colors and opacities at 256 steps from its start to its end, worked out once per gradient. */
+const TABLES = new WeakMap<Gradient, Float32Array>()
+function tableOf(g: Gradient): Float32Array {
+  const known = TABLES.get(g)
+  if (known !== undefined) return known
+  const table = new Float32Array(256 * 4)
+  const stops = g.stops.length > 0 ? g.stops : [{ offset: 0, color: [0, 0, 0] as Rgb, opacity: 0 }]
+  for (let k = 0; k < 256; k++) {
+    const t = k / 255
+    let rgba: [number, number, number, number]
+    const first = stops[0] as (typeof stops)[number]
+    const last = stops[stops.length - 1] as (typeof stops)[number]
+    if (t <= first.offset) rgba = [...first.color, first.opacity]
+    else if (t >= last.offset) rgba = [...last.color, last.opacity]
+    else {
+      let j = 1
+      while (j < stops.length - 1 && t > (stops[j] as (typeof stops)[number]).offset) j++
+      const s0 = stops[j - 1] as (typeof stops)[number]
+      const s1 = stops[j] as (typeof stops)[number]
+      const f = s1.offset === s0.offset ? 1 : (t - s0.offset) / (s1.offset - s0.offset)
+      const mix = (u: number, v: number): number => u + (v - u) * f
+      rgba = [mix(s0.color[0], s1.color[0]), mix(s0.color[1], s1.color[1]), mix(s0.color[2], s1.color[2]), mix(s0.opacity, s1.opacity)]
+    }
+    // Colors in steps of four, opacity in sixty-fourths: too fine to see, and a PNG of soft gradients packs far smaller.
+    table.set([Math.round(rgba[0] / 4) * 4, Math.round(rgba[1] / 4) * 4, Math.round(rgba[2] / 4) * 4, Math.round(rgba[3] * 64) / 64], k * 4)
+  }
+  TABLES.set(g, table)
+  return table
+}
+
+/** How far along a gradient a place lies, 0 to 1, the place in the gradient's own units. */
+function whereOn(g: Gradient): (x: number, y: number) => number {
+  const a = g.attrs
+  if (g.kind === 'linear') {
+    const x1 = num(a.x1, 0)
+    const y1 = num(a.y1, 0)
+    const dx = num(a.x2, 1) - x1
+    const dy = num(a.y2, 0) - y1
+    const len = dx * dx + dy * dy || 1
+    return (x, y) => ((x - x1) * dx + (y - y1) * dy) / len
+  }
+  const cx = num(a.cx, 0.5)
+  const cy = num(a.cy, 0.5)
+  const r = num(a.r, 0.5) || 1e-6
+  const fx = num(a.fx, cx)
+  const fy = num(a.fy, cy)
+  // The circle through the place, of those growing from the focus to the end circle: |d - t c| = t r.
+  const ccx = cx - fx
+  const ccy = cy - fy
+  const A = ccx * ccx + ccy * ccy - r * r
+  if (Math.abs(A) < 1e-9 || (ccx === 0 && ccy === 0)) return (x, y) => Math.hypot(x - fx, y - fy) / r
+  return (x, y) => {
+    const dx = x - fx
+    const dy = y - fy
+    const B = dx * ccx + dy * ccy
+    const disc = B * B - A * (dx * dx + dy * dy)
+    return disc < 0 ? 1 : (B - Math.sqrt(disc)) / A
+  }
+}
+
+/** The box around a shape in its own units, for a gradient that is laid out in fractions of it. */
+function boxOf(shape: Shape, t: number): [number, number, number, number] {
+  const a = shape.attrs
+  if (shape.tag === 'circle') {
+    const r = Math.max(0, valueAt(shape, 'r', num(a.r, 0), t))
+    return [num(a.cx, 0) - r, num(a.cy, 0) - r, 2 * r, 2 * r]
+  }
+  if (shape.tag === 'ellipse') return [num(a.cx, 0) - num(a.rx, 0), num(a.cy, 0) - num(a.ry, 0), 2 * num(a.rx, 0), 2 * num(a.ry, 0)]
+  if (shape.tag === 'rect') return [num(a.x, 0), num(a.y, 0), num(a.width, 0), num(a.height, 0)]
+  let x0 = Infinity
+  let y0 = Infinity
+  let x1 = -Infinity
+  let y1 = -Infinity
+  for (const sub of shape.subs ?? []) {
+    for (const p of sub.points) {
+      x0 = Math.min(x0, p.x)
+      y0 = Math.min(y0, p.y)
+      x1 = Math.max(x1, p.x)
+      y1 = Math.max(y1, p.y)
+    }
+  }
+  return x0 === Infinity ? [0, 0, 1, 1] : [x0, y0, x1 - x0, y1 - y0]
+}
+
 function paintShape(cv: Canvas, shape: Shape, t: number, scale: number): void {
   const a = shape.attrs
   const opacity = Math.min(1, Math.max(0, valueAt(shape, 'opacity', num(a.opacity, 1), t)))
@@ -821,7 +974,37 @@ function paintShape(cv: Canvas, shape: Shape, t: number, scale: number): void {
     paintText(cv, shape, place, scale, opacity)
     return
   }
-  const fill = shape.tag === 'line' ? undefined : colorOf(a.fill ?? '#000000')
+  const flat = shape.tag === 'line' ? undefined : colorOf(a.fill ?? '#000000')
+  const gradient = shape.tag === 'line' ? undefined : shape.gradient
+  const fill: Rgb | undefined = gradient !== undefined ? [0, 0, 0] : flat
+  /** Lays the fill through the mask: its one color, or its gradient read at each pixel in the shape's own units. */
+  const lay = (): void => {
+    if (gradient === undefined) {
+      if (flat !== undefined) cv.composite(flat, opacity)
+      return
+    }
+    const o = place({ x: 0, y: 0 })
+    const ex = place({ x: 1, y: 0 })
+    const ey = place({ x: 0, y: 1 })
+    const m: Matrix = [ex.x - o.x, ex.y - o.y, ey.x - o.x, ey.y - o.y, o.x, o.y]
+    const det = m[0] * m[3] - m[1] * m[2]
+    const along = whereOn(gradient)
+    // In a box's fractions unless the gradient says it is in the shape's own units.
+    const [bx, by, bw, bh] = gradient.attrs.gradientUnits === 'userSpaceOnUse' ? [0, 0, 1, 1] : boxOf(shape, t)
+    if (det === 0 || bw === 0 || bh === 0) {
+      cv.composite([0, 0, 0], 0)
+      return
+    }
+    cv.compositeBy(
+      (px, py) => {
+        const dx = px - m[4]
+        const dy = py - m[5]
+        return along(((m[3] * dx - m[2] * dy) / det - bx) / bw, ((-m[1] * dx + m[0] * dy) / det - by) / bh)
+      },
+      tableOf(gradient),
+      opacity,
+    )
+  }
   const stroke = colorOf(a.stroke)
   const half = (num(a['stroke-width'], 1) * scale) / 2
 
@@ -829,7 +1012,7 @@ function paintShape(cv: Canvas, shape: Shape, t: number, scale: number): void {
     if (fill === undefined) return
     const at = place({ x: num(a.x, 0), y: num(a.y, 0) })
     fillRoundRect(cv, at.x, at.y, num(a.width, 0) * scale, num(a.height, 0) * scale, num(a.rx, 0) * scale)
-    cv.composite(fill, opacity)
+    lay()
     return
   }
 
@@ -840,7 +1023,7 @@ function paintShape(cv: Canvas, shape: Shape, t: number, scale: number): void {
     const at = place(c)
     if (fill !== undefined) {
       fillDisk(cv, at.x, at.y, r * scale)
-      cv.composite(fill, opacity)
+      lay()
     }
     if (stroke === undefined) return
     if (a['stroke-dasharray'] === undefined) {
@@ -853,7 +1036,7 @@ function paintShape(cv: Canvas, shape: Shape, t: number, scale: number): void {
     outline = [ellipseOf(num(a.cx, 0), num(a.cy, 0), num(a.rx, 0), num(a.ry, 0))]
     if (fill !== undefined) {
       fillSubs(cv, outline.map(sub => ({ points: sub.points.map(place), closed: true })))
-      cv.composite(fill, opacity)
+      lay()
     }
     if (stroke === undefined) return
   } else if (shape.tag === 'line') {
@@ -863,7 +1046,7 @@ function paintShape(cv: Canvas, shape: Shape, t: number, scale: number): void {
     outline = shape.subs ?? []
     if (fill !== undefined) {
       fillSubs(cv, outline.map(sub => ({ points: sub.points.map(place), closed: true })))
-      cv.composite(fill, opacity)
+      lay()
     }
     if (stroke === undefined) return
   }

@@ -703,7 +703,7 @@ test('the context ring, the crew, the model change and the light theme are drawn
     setupFrom({ theme: 'dark' }),
   )
   // Every color is a plain hex color written as an attribute: the planets have their own, beside the palette's.
-  expect((lit.match(/ (fill|stroke)="[^"]*"/g) ?? []).filter(a => !/="(#[0-9a-f]{6}|none|freeze)"$/.test(a))).toEqual([])
+  expect((lit.match(/ (fill|stroke)="[^"]*"/g) ?? []).filter(a => !/="(#[0-9a-f]{6}|none|freeze|url\(#[\w-]+\))"$/.test(a))).toEqual([])
 })
 
 const stepOn = (model: string) => ({ turnId: 't1', index: 0, model, messageCount: 1 }) as const
@@ -1038,7 +1038,7 @@ test('with reduced motion nothing flies, spreads or spins, and a call still show
   expect(still.split('repeatCount="indefinite"').length - 1).toBe(1)
   // The call is still there to see: its spoke flashes, the running station wears its ring, each subagent has a place.
   expect(still).toContain('values=".55;0"')
-  expect(still.split('transform="rotate(').length - 1).toBe(full.split('transform="rotate(').length - 1 + 2)
+  expect(still.split('<g transform="rotate(').length - 1).toBe(full.split('<g transform="rotate(').length - 1 + 2)
   expect(setupFrom({ motion: 'none' }).motion).toBe('full')
 })
 

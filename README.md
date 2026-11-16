@@ -1,6 +1,6 @@
 # alien-map
 
-A space-themed live map of Claude Code's work, in a pane beside the chat. An orange alien flies a UFO in the middle. Each kind of work is a planet. Every tool call is a tiny rocket that leaves the saucer, docks at its planet while the call runs, and flies home when it ends.
+A space-themed live map of Claude Code's work, in a pane beside the chat, drawn in a lit, 3D-render style. An orange alien flies a UFO in the middle. Each kind of work is a planet. Every tool call is a tiny rocket that leaves the saucer, docks at its planet while the call runs, and flies home when it ends.
 
 Built on [lot-map](https://github.com/alexeyw/lot-map) by Aleksei Volodin (MIT). The hooks, the privacy rules and the options are lot-map's. The drawing and the models column are new.
 
@@ -24,6 +24,10 @@ claude --plugin-dir /path/to/alien-map
 ```
 
 If you also have lot-map installed, disable one of them. Both watch the same hooks.
+
+## The look
+
+Everything round is lit from the upper left: each planet has its own colors and surface, a night side, a bright spot where the light strikes, a thin rim of light and a halo of air. The alien's head and eyes are glossy, the dome is glass, the saucer is brushed metal with glowing beads round its rim, and every rocket is shaded round its hull. All of it is SVG gradients, so it stays sharp at any size.
 
 ## The planets
 
@@ -72,7 +76,7 @@ In a terminal the models show on one line under the station tally.
 * A thin line traces the main loop's route between planets and fades after a minute.
 * Space stays dark on every theme. `colors` still works for text, labels, errors and the route, and `background=#rrggbb` gives a plain ground.
 * `motion: reduced` stops the rockets, twinkles, glances and blinks. Rockets show parked at the planet whose call runs.
-* `terminalView: picture` paints the same space map in terminals that show pictures (iTerm2, kitty, Ghostty). The painter now fills shapes so the planets keep their look.
+* `terminalView: picture` paints the same space map in terminals that show pictures (iTerm2, kitty, Ghostty). The painter now fills shapes and gradients, so the planets keep their light and shade. The sky behind is drawn plain there to keep each frame near 250 KB.
 
 The rest of lot-map's options work as before: language, memory servers and commands, hook reasons, subagent names, layout, text size and braille. See lot-map's README for the full list.
 

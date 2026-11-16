@@ -1,5 +1,11 @@
 # Changelog
 
+## alien-map 0.2.0
+
+* A lit, 3D-render look: shaded planets with night sides, highlights, rims and halos of air; a glossy alien; a glass dome; a brushed metal saucer with glowing beads; shaded rockets; deep space with clouds of gas.
+* The terminal painter reads gradients, in the shape's own units or in fractions of its box.
+* Rockets are one set of shapes turned to each heading, so the drawing stays small.
+
 ## alien-map 0.1.0
 
 Forked from lot-map 0.8.0.
