@@ -7,9 +7,9 @@ import { STATIONS, setupFrom } from './map'
 import { fromBase64 } from './raster'
 
 const PANE = {
-  plugin: 'lot-map',
+  plugin: 'alien-map',
   component: 'Pane',
-  requestId: 'lot-map',
+  requestId: 'alien-map',
   props: { title: 'Map', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
 } as const
 
@@ -224,7 +224,7 @@ test('the braille map gets frames only while something on it moves, about eight 
   await clock.advance(1000)
   expect(frames.length).toBeGreaterThanOrEqual(6)
   expect(frames.length).toBeLessThanOrEqual(8)
-  expect(frames[0]).toMatchObject({ requestId: 'lot-map', key: 'map', columns: 60, rows: 21 })
+  expect(frames[0]).toMatchObject({ requestId: 'alien-map', key: 'map', columns: 60, rows: 21 })
   // Then two frames more, each at its moment: the spoke goes out (1.6 s), the station's glow goes out (3.2 s).
   const flown = frames.length
   await clock.advance(3000)

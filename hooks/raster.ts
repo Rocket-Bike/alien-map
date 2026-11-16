@@ -183,7 +183,6 @@ export function parseMap(svg: string): Scene {
       }
       default: {
         const shapeTag = tag as Shape['tag']
-        if ((shapeTag === 'path' || shapeTag === 'ellipse') && (attrs.fill ?? 'black') !== 'none') flag(`${tag} filled`)
         if (shapeTag === 'text' && attrs.stroke !== undefined && attrs['paint-order'] !== 'stroke') flag('text stroked over its fill')
         const groups = stack.filter(f => f.group !== undefined).map(f => f.group as Group).reverse()
         const shape: Shape = { tag: shapeTag, attrs, animations: [], groups, runs: [] }
@@ -703,6 +702,60 @@ function strokeSegment(cv: Canvas, ax: number, ay: number, bx: number, by: numbe
   }
 }
 
+/** Fills closed outlines by the nonzero rule, four rows of samples to a pixel and exact coverage along each row. */
+function fillSubs(cv: Canvas, subs: readonly Sub[]): void {
+  const edges: [number, number, number, number][] = []
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const sub of subs) {
+    const pts = sub.points
+    for (let k = 0; k < pts.length; k++) {
+      const a = pts[k] as Point
+      const b = pts[(k + 1) % pts.length] as Point
+      if (a.y !== b.y) edges.push([a.x, a.y, b.x, b.y])
+      minX = Math.min(minX, a.x)
+      maxX = Math.max(maxX, a.x)
+      minY = Math.min(minY, a.y)
+      maxY = Math.max(maxY, a.y)
+    }
+  }
+  if (edges.length === 0) return
+  const [x0, y0, x1, y1] = cv.touch(minX - 1, minY - 1, maxX + 1, maxY + 1)
+  const { mask, width } = cv
+  const SUB = 4
+  const row = new Float32Array(x1 - x0 + 2)
+  for (let y = y0; y <= y1; y++) {
+    row.fill(0)
+    for (let s = 0; s < SUB; s++) {
+      const sy = y + (s + 0.5) / SUB
+      const hits: [number, number][] = []
+      for (const [ax, ay, bx, by] of edges) {
+        if ((sy < ay) === (sy < by)) continue
+        hits.push([ax + ((sy - ay) * (bx - ax)) / (by - ay), by > ay ? 1 : -1])
+      }
+      hits.sort((p, q) => p[0] - q[0])
+      let wind = 0
+      for (let h = 0; h < hits.length - 1; h++) {
+        wind += (hits[h] as [number, number])[1]
+        if (wind === 0) continue
+        const left = Math.max(x0, (hits[h] as [number, number])[0])
+        const right = Math.min(x1 + 1, (hits[h + 1] as [number, number])[0])
+        for (let px = Math.floor(left); px < right; px++) {
+          const cover = Math.min(px + 1, right) - Math.max(px, left)
+          if (cover > 0) row[px - x0] = (row[px - x0] as number) + cover / SUB
+        }
+      }
+    }
+    for (let x = x0; x <= x1; x++) {
+      const c = Math.min(1, row[x - x0] as number)
+      const i = y * width + x
+      if (c > (mask[i] as number)) mask[i] = c
+    }
+  }
+}
+
 function strokeSubs(cv: Canvas, subs: readonly Sub[], half: number, roundCaps: boolean): void {
   for (const sub of subs) {
     const pts = sub.closed ? [...sub.points, sub.points[0] as Point] : sub.points
@@ -797,14 +850,22 @@ function paintShape(cv: Canvas, shape: Shape, t: number, scale: number): void {
     }
     outline = [ellipseOf(c.x, c.y, r, r)]
   } else if (shape.tag === 'ellipse') {
-    if (stroke === undefined) return
     outline = [ellipseOf(num(a.cx, 0), num(a.cy, 0), num(a.rx, 0), num(a.ry, 0))]
+    if (fill !== undefined) {
+      fillSubs(cv, outline.map(sub => ({ points: sub.points.map(place), closed: true })))
+      cv.composite(fill, opacity)
+    }
+    if (stroke === undefined) return
   } else if (shape.tag === 'line') {
     if (stroke === undefined) return
     outline = [{ points: [{ x: num(a.x1, 0), y: num(a.y1, 0) }, { x: num(a.x2, 0), y: num(a.y2, 0) }], closed: false }]
   } else {
-    if (stroke === undefined) return
     outline = shape.subs ?? []
+    if (fill !== undefined) {
+      fillSubs(cv, outline.map(sub => ({ points: sub.points.map(place), closed: true })))
+      cv.composite(fill, opacity)
+    }
+    if (stroke === undefined) return
   }
 
   const pattern = numbers(a['stroke-dasharray'])

@@ -8,9 +8,9 @@ import { hasGlyph } from './raster'
 import { stringsFor } from './text'
 
 const PANE = {
-  plugin: 'lot-map',
+  plugin: 'alien-map',
   component: 'Pane',
-  requestId: 'lot-map',
+  requestId: 'alien-map',
   props: { title: 'Map', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
 } as const
 
@@ -401,9 +401,9 @@ test('options that make no sense count as not set', () => {
 
 test('a long name shrinks inside the core and cannot break the drawing', () => {
   const svg = (name: string) => drawMap({ entries: [], counts: {} }, 1000, setupFrom({ coreName: name }))
+  // The name stands on the front of the saucer.
   expect(svg('A<B&"C"DEFGHIJK')).toContain('A&lt;B&amp;&quot;C&quot;DEF<')
-  expect(svg('ABC')).toContain('font-size="17" letter-spacing="2.5"')
-  expect(svg('CLAUDE')).toContain('font-size="13.8"')
+  expect(svg('ABC')).toContain('>ABC<')
   expect(svg('')).toContain('>CLAUDE<')
 })
 
@@ -458,7 +458,7 @@ test('with no options set the map speaks English and shows no record numbers', a
 
 test('a call shows on the pane, on every surface', { options: OWN }, async ($, on) => {
   on('clock.now', () => ({ value: 1_000_000 }))
-  on('command.register', () => ({ value: { command: 'lot-map' } }))
+  on('command.register', () => ({ value: { command: 'alien-map' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.call', () => ({ result: {} }))
@@ -627,7 +627,7 @@ test('the route is the main loop\'s stations in order, repeats and model steps l
   expect(routeOf(entries, 2).map(stop => stop.station)).toEqual(['files', 'shell'])
 
   const svg = drawMap({ entries, counts: {} }, 5000, STRANGER)
-  expect(svg.split('<path d="M').length - 1).toBe(3)
+  expect(svg.match(/<path d="M[^"]*Q[^"]*" fill="none" stroke="#ebe6dd"/g)?.length).toBe(3)
   expect(svg).toContain('stroke-dashoffset')
 })
 
@@ -653,13 +653,16 @@ test('finished calls in a row at one station fold into one row, anything else st
   expect(foldRows(Array.from({ length: 40 }, (_, i) => entry(i % 2 ? 'files' : 'shell', i * 20))).length).toBe(16)
 })
 
-test('a spoke wears in with use and memory has a colour of its own', () => {
+test('a lane wears in with use in its planet\'s colour, and each planet carries its count', () => {
   const quiet = drawMap({ entries: [], counts: {} }, 1000, STRANGER)
   const busy = drawMap({ entries: [], counts: { files: 200, memory: 9 }, pushed: 4 }, 1000, STRANGER)
-  expect(quiet).not.toContain('stroke-width="3.6"')
-  expect(busy).toContain('stroke-width="3.6"')
-  expect(busy).toContain('>5 <tspan fill="#62c7ba">↓4</tspan>')
-  expect(drawMap({ entries: [], counts: { memory: 4 }, pushed: 4 }, 1000, STRANGER)).toContain('><tspan fill="#62c7ba">↓4</tspan>')
+  // Mars, the files planet, is red: its lane takes its colour at full wear.
+  expect(quiet).not.toContain('stroke="#e2774f" stroke-width="3"')
+  expect(busy).toContain('stroke="#e2774f" stroke-width="3"')
+  expect(busy).toContain('fill="#e2774f">200<')
+  expect(busy).toContain('fill="#7c9bff">9<')
+  // An unused planet shows a dim zero.
+  expect(quiet.split('>0<').length - 1).toBe(10)
 })
 
 test('a long call shows two clock hands, several at once a count, a fault a dot until the next message', () => {
@@ -671,7 +674,7 @@ test('a long call shows two clock hands, several at once a count, a fault a dot 
   expect(one).not.toContain('×')
   const three = drawMap({ entries: [running(now - 300), running(now - 200), running(now - 100)], counts: { shell: 3 } }, now, STRANGER)
   expect(three).toContain('>×3<')
-  expect(drawMap({ entries: [], counts: {}, faults: { shell: 2 } }, now, STRANGER)).toContain('font-weight="700" fill="#0a0c11">2<')
+  expect(drawMap({ entries: [], counts: {}, faults: { shell: 2 } }, now, STRANGER)).toContain('font-weight="700" fill="#070b18">2<')
   expect(drawMap({ entries: [], counts: {} }, now, STRANGER)).not.toContain('font-weight="700"')
 })
 
@@ -680,32 +683,27 @@ test('the context ring, the crew, the model change and the light theme are drawn
   const bare = drawMap({ entries: [], counts: {} }, now, STRANGER)
   expect(bare).not.toContain('pathLength="100"')
   expect(bare).not.toContain('animateTransform')
-  expect(bare).toContain('#0a0c11')
 
   const full = drawMap({ entries: [], counts: {}, model: 'claude-fable-5-2', context: 92.4, agents: ['a', 'b'], switchedAt: now - 2000 }, now, STRANGER)
-  expect(full).toContain('stroke="#e8654f" pathLength="100" stroke-dasharray="92 100"')
+  expect(full).toContain('stroke="#e8654f" stroke-linecap="round" pathLength="100" stroke-dasharray="92 100"')
   expect(full).toContain('>92%<')
   expect(full.split('<animateTransform').length - 1).toBe(2)
   expect(full).toContain('repeatCount="4" fill="freeze"')
   expect(drawMap({ entries: [], counts: {}, switchedAt: now - 9000 }, now, STRANGER)).not.toContain('repeatCount="1" fill="freeze"')
 
-  // Left to itself the map is drawn dark and carries the rules that repaint it on a light surface; a set theme carries none.
-  expect(bare).toContain('<style>@media (prefers-color-scheme: light){[fill="#0a0c11"]{fill:#f5f2ea}')
-  expect(bare).toContain('<rect width="460" height="430" rx="12" fill="#0a0c11"/>')
-  const dark = drawMap({ entries: [], counts: {} }, now, setupFrom({ theme: 'dark' }))
-  expect(dark).not.toContain('<style>')
-  expect(dark).not.toContain('#f5f2ea')
+  // Space is dark whatever the theme: no rules repaint it, and a light theme draws the same map.
+  expect(bare).not.toContain('<style>')
+  expect(bare).toContain('<rect width="460" height="430" rx="12" fill="#070b18"/>')
   const light = drawMap({ entries: [], counts: {} }, now, setupFrom({ theme: 'light' }))
-  expect(light).not.toContain('<style>')
-  expect(light).toContain('<rect width="460" height="430" rx="12" fill="#f5f2ea"/>')
+  expect(light).toBe(drawMap({ entries: [], counts: {} }, now, setupFrom({ theme: 'dark' })))
   // Whatever is lit, every color the dark drawing uses is one the rules know.
   const lit = drawMap(
     { entries: [entry('memory', now - 100, { from: 'inbound' }), entry('shell', now - 50, { status: 'err' }), entry('files', now - 20, { status: 'run', endedAt: undefined })], counts: { files: 50, memory: 3 }, pushed: 1, faults: { shell: 1 }, context: 80, agents: ['a'], switchedAt: now - 10, model: 'claude-fable-5-2' },
     now,
     setupFrom({ theme: 'dark' }),
   )
-  const known = new Set(['#0a0c11', '#12151c', '#272c36', '#1a1e27', '#ebe6dc', '#9ba1ab', '#6b7280', '#e1ac6e', '#f0c595', '#e8654f', '#62c7ba', '#a5e6dc', '#ebe6dd'])
-  expect([...new Set(lit.match(/#[0-9a-f]{6}/g) ?? [])].filter(color => !known.has(color))).toEqual([])
+  // Every color is a plain hex color written as an attribute: the planets have their own, beside the palette's.
+  expect((lit.match(/ (fill|stroke)="[^"]*"/g) ?? []).filter(a => !/="(#[0-9a-f]{6}|none|freeze)"$/.test(a))).toEqual([])
 })
 
 const stepOn = (model: string) => ({ turnId: 't1', index: 0, model, messageCount: 1 }) as const
@@ -856,9 +854,9 @@ test('the PowerShell tool is read like the shell: its description as the label, 
   expect(classify('Bash', { command: 'Get-Content notes.txt' }, SETUP).station).toBe('shell')
 })
 
-test('the route is soft on a light surface and each leg fades by itself after a while', () => {
+test('the route is soft and each leg fades by itself after a while', () => {
   const walk = [entry('you', 1000, { from: 'inbound' }), entry('memory', 2000), entry('files', 3000), entry('shell', 4000)]
-  const legs = (svg: string) => svg.split('<path d="M').length - 1
+  const legs = (svg: string) => svg.match(/<path d="M[^"]*Q[^"]*" fill="none" stroke="#ebe6dd"/g)?.length ?? 0
   const fresh = 5000
 
   // Three legs, each carrying the animation that takes it away: it starts when the hold is over.
@@ -868,12 +866,8 @@ test('the route is soft on a light surface and each leg fades by itself after a 
   expect(dark).toContain(`begin="${((TRAIL_HOLD_MS - (fresh - 4000)) / 1000).toFixed(3)}s" dur="${(TRAIL_FADE_MS / 1000).toFixed(3)}s"`)
   expect(dark).toContain('stroke="#ebe6dd"')
 
-  // On a light surface the route is a grey of its own, not the ink of the words.
-  const light = drawMap({ entries: walk, counts: {} }, fresh, setupFrom({ theme: 'light' }))
-  expect(light).toContain('stroke="#9c978b"')
-  expect(light).not.toMatch(/<path d="M[^>]*stroke="#1f2228"[^>]*stroke-linecap="round" opacity=/)
-  // Left to itself the map repaints the route with the rest.
-  expect(drawMap({ entries: walk, counts: {} }, fresh, STRANGER)).toContain('[stroke="#ebe6dd"]{stroke:#9c978b}')
+  // Space stays dark on a light theme, and so does the route on it.
+  expect(drawMap({ entries: walk, counts: {} }, fresh, setupFrom({ theme: 'light' }))).toContain('stroke="#ebe6dd"')
 
   // A leg in the middle of its fading starts the animation in the past, so it is drawn part-way gone.
   // The two older legs are gone by then; the newest has a second left.
@@ -892,13 +886,13 @@ test('colors of your own replace their places in the palette, and nothing but a 
   const board = { entries: [entry('you', 1000, { from: 'inbound' }), entry('files', 2000), entry('shell', 3000)], counts: { files: 1, shell: 1 } }
   const draw = (options: Record<string, unknown>) => drawMap(board, 4000, setupFrom(options))
 
-  const own = draw({ theme: 'dark', colors: ['accent=#FF9900', 'background = #123', 'route=#00ff88'] })
+  const own = draw({ theme: 'dark', colors: ['text=#FF9900', 'background = #123', 'route=#00ff88'] })
   expect(own).toContain('#ff9900')
-  expect(own).not.toContain('#e1ac6e')
+  expect(own).not.toContain('#ebe6dc')
   expect(own).toContain('<rect width="460" height="430" rx="12" fill="#112233"/>')
   expect(own).toContain('stroke="#00ff88"')
   // The rest of the palette is as it was.
-  expect(own).toContain('#ebe6dc')
+  expect(own).toContain('#9ba1ab')
 
   // Written as one line with commas, as `claude plugin configure` takes lists.
   expect(setupFrom({ colors: 'accent=#ff9900, text=#ffffff' }).colors).toEqual({ accent: '#ff9900', bone: '#ffffff' })
@@ -909,18 +903,12 @@ test('colors of your own replace their places in the palette, and nothing but a 
   expect(draw({ theme: 'dark', colors: hostile })).toBe(draw({ theme: 'dark' }))
   expect(draw({ theme: 'dark', colors: 12 })).toBe(draw({ theme: 'dark' }))
 
-  // Left on `auto`, a color of your own holds on a light surface too; the rest is still repainted.
-  const auto = draw({ colors: ['accent=#ff9900'] })
-  expect(auto).not.toContain('[fill="#ff9900"]')
-  expect(auto).not.toContain('[fill="#e1ac6e"]')
-  expect(auto).toContain('[fill="#0a0c11"]{fill:#f5f2ea}')
-  // A color that takes the value of another place keeps that place from being repainted with it.
-  expect(draw({ colors: ['accent=#ebe6dc'] })).not.toContain('[fill="#ebe6dc"]')
 
   // Every place of the palette has a name, and no two names share a place.
   expect(new Set(Object.values(COLOR_NAMES)).size).toBe(13)
   // The setting does not leak into the next drawing.
-  expect(draw({ theme: 'dark' })).toContain('#e1ac6e')
+  expect(draw({ theme: 'dark' })).toContain('#ebe6dc')
+  expect(draw({ theme: 'dark' })).not.toContain('#112233')
 })
 
 const NOTICE = (id: string, status: string): string =>
@@ -1049,7 +1037,7 @@ test('with reduced motion nothing flies, spreads or spins, and a call still show
   expect([...kinds].sort()).toEqual(['opacity', 'stroke-dashoffset'])
   expect(still.split('repeatCount="indefinite"').length - 1).toBe(1)
   // The call is still there to see: its spoke flashes, the running station wears its ring, each subagent has a place.
-  expect(still).toContain('values=".75;0"')
+  expect(still).toContain('values=".55;0"')
   expect(still.split('transform="rotate(').length - 1).toBe(full.split('transform="rotate(').length - 1 + 2)
   expect(setupFrom({ motion: 'none' }).motion).toBe('full')
 })
@@ -1148,7 +1136,7 @@ test('on vscode the zoom buttons share the line of now, and the desktop pane has
 
 test('the zoom buttons draw the map smaller or larger in the editor, and the next session keeps it', async ($, on) => {
   on('clock.now', () => ({ value: 1_000_000 }))
-  on('command.register', () => ({ value: { command: 'lot-map' } }))
+  on('command.register', () => ({ value: { command: 'alien-map' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   const kept = fakeStore(on as never)
@@ -1387,4 +1375,95 @@ test('more commands that reach the network are known by name or by subcommand', 
   for (const c of ['yarn build', 'git submodule status', 'git remote -v', 'terraform fmt', 'helm template .', 'openssl sha256 a.bin', 'deno run a.ts', 'svn status', 'bunx cowsay', 'npx cowsay']) {
     expect([c, stationOf(c)]).toEqual([c, 'shell'])
   }
+})
+
+// ---- the space map ------------------------------------------------------------------------------
+
+test('each model step counts for its model, and the models column lists them beside the rows', { options: OWN }, async ($, on) => {
+  on('clock.now', () => ({ value: 1_000_000 }))
+  on('turn.step', async function* () {
+    return { turnId: 't1', index: 0, answer: '', toolUses: [] } as never
+  })
+  for (const model of ['claude-opus-5-5', 'claude-opus-5-5', 'claude-haiku-5-5']) {
+    for await (const _ of $.turn.step(stepOn(model))) void _
+  }
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: 'Models' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Activity' })).toBeDefined()
+  // Done steps are dim, the most used model first.
+  const opus = await ui.find({ type: 'Text', text: '· opus 5.5' })
+  expect(opus?.props.dimColor).toBe(true)
+  expect(await ui.find({ type: 'Text', text: '· haiku 5.5' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '2' })).toBeDefined()
+  await ui.unmount()
+  // The terminal, with no columns, says the same on one line.
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await term.find({ type: 'Text', text: 'Models: opus 5.5 2 · haiku 5.5 1' })).toBeDefined()
+  await term.unmount()
+})
+
+test('a model lights in the models column while its step runs', { options: OWN }, async ($, on) => {
+  on('clock.now', () => ({ value: 1_000_000 }))
+  let seen: { color: unknown; dim: unknown } | undefined
+  on('turn.step', async function* () {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const row = await ui.find({ type: 'Text', text: '● opus 5.5' })
+    seen = { color: row?.props.color, dim: row?.props.dimColor }
+    await ui.unmount()
+    return { turnId: 't1', index: 0, answer: '', toolUses: [] } as never
+  })
+  for await (const _ of $.turn.step(stepOn('claude-opus-5-5'))) void _
+  expect(seen).toEqual({ color: 'claude', dim: false })
+})
+
+test('the alien worries past 80% of the context, and only then', () => {
+  const now = 1_000_000
+  const at = (context: number) => drawMap({ entries: [entry('files', now - 5000)], counts: { files: 1 }, context }, now, STRANGER)
+  // A drop of sweat runs down its head.
+  expect(at(79)).not.toContain('#8fd3ff')
+  expect(at(80)).toContain('#8fd3ff')
+  expect(at(95)).toContain('#8fd3ff')
+})
+
+test('the alien says ! for a while when something went wrong, ? when it waits on you, and dozes after a quiet spell', () => {
+  const now = 1_000_000
+  const draw = (entries: Entry[], context?: number) => drawMap({ entries, counts: {}, ...(context !== undefined ? { context } : {}) }, now, STRANGER)
+  // The fright is written with its end, 6 s after the fault, so it passes without a new drawing.
+  const fright = draw([entry('shell', now - 1000, { status: 'err' })])
+  expect(fright).toContain('!</text>')
+  expect(fright).toContain('values="0;0" begin="5.010s" dur=".001s" fill="freeze"')
+  expect(draw([entry('shell', now - 60_000, { status: 'err' })])).not.toContain('!</text>')
+  expect(draw([entry('you', now - 1000, { status: 'run', endedAt: undefined })])).toContain('?</text>')
+  // Asleep after two quiet minutes: already, or written in for when they are up.
+  const z = /<text [^>]*>(<animate [^>]*\/>)*z<\/text>/
+  expect(draw([entry('files', now - 200_000)])).toMatch(z)
+  expect(draw([entry('files', now - 200_000)])).toMatch(/<text [^>]*opacity="0"><animate attributeName="opacity" values="0;1;1;0"[^>]*\/>z</)
+  // Five seconds after the last call, the z's are written in to start 115 s from now.
+  expect(draw([entry('files', now - 5000)])).toMatch(/begin="115.010s" dur="2.8s" repeatCount="indefinite"\/>z</)
+  // Never while something runs, and never while worried.
+  expect(draw([entry('files', now - 200_000, { status: 'run', endedAt: undefined })])).not.toMatch(z)
+  expect(draw([entry('files', now - 200_000)], 90)).not.toMatch(z)
+})
+
+test('at rest the alien looks about at the planets now and then; at work it watches the planet that works', () => {
+  const now = 1_000_000
+  const glance = 'values="0;0;1;1;0;0;0;0;0;0"'
+  const idle = drawMap({ entries: [entry('files', now - 20_000)], counts: {} }, now, STRANGER)
+  expect(idle).toContain(glance)
+  const busy = drawMap({ entries: [entry('files', now - 5000, { status: 'run', endedAt: undefined })], counts: {} }, now, STRANGER)
+  expect(busy).not.toContain(glance)
+  // With reduced motion it keeps its eyes still.
+  expect(drawMap({ entries: [entry('files', now - 20_000)], counts: {} }, now, setupFrom({ motion: 'reduced' }))).not.toContain(glance)
+})
+
+test('a rocket leaves the saucer for its planet, docks while the call runs, and flies home when it ends', () => {
+  const now = 1_000_000
+  const flying = drawMap({ entries: [entry('files', now - 300, { status: 'run', endedAt: undefined })], counts: {} }, now, STRANGER)
+  // Six parts fly together: body, nose, window, two fins and a flame.
+  expect(flying.split('<animateMotion path="M').length - 1).toBe(6)
+  const docked = drawMap({ entries: [entry('files', now - 5000, { status: 'run', endedAt: undefined })], counts: {} }, now, STRANGER)
+  expect(docked).not.toContain('<animateMotion path="M')
+  expect(docked).toContain('<path transform="translate(')
+  const home = drawMap({ entries: [entry('files', now - 5000, { endedAt: now - 200 })], counts: {} }, now, STRANGER)
+  expect(home.split('<animateMotion path="M').length - 1).toBe(6)
 })

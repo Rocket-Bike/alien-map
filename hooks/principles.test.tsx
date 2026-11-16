@@ -7,9 +7,9 @@ import { imageSource, paint, parseMap, scaleFor } from './raster'
 import { SCALE } from './terminal'
 
 const PANE = {
-  plugin: 'lot-map',
+  plugin: 'alien-map',
   component: 'Pane',
-  requestId: 'lot-map',
+  requestId: 'alien-map',
   props: { title: 'Map', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
 } as const
 

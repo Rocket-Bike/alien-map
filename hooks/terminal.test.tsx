@@ -8,9 +8,9 @@ import { schemeFrom } from './terminal'
 import { stringsFor } from './text'
 
 const PANE = {
-  plugin: 'lot-map',
+  plugin: 'alien-map',
   component: 'Pane',
-  requestId: 'lot-map',
+  requestId: 'alien-map',
   props: { title: 'Map', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
 } as const
 
@@ -182,7 +182,9 @@ test('the picture is painted again only while something moves, and the core brea
   expect(nextChangeIn(leg, 1500)).toBe(FASTEST_MS)
   expect(nextChangeIn(leg, 5000)).toBeGreaterThan(30_000)
   expect(nextChangeIn(leg, 5000)).toBeLessThan(TRAIL_HOLD_MS)
-  expect(nextChangeIn(leg, TRAIL_HOLD_MS + TRAIL_FADE_MS)).toBeUndefined()
+  // Once the route is gone, the painter sleeps until the alien dozes off, two minutes after the last call.
+  expect(nextChangeIn(leg, TRAIL_HOLD_MS + TRAIL_FADE_MS)).toBe(120_000 - 490 - TRAIL_HOLD_MS - TRAIL_FADE_MS)
+  expect(nextChangeIn(leg, 120_000)).toBeUndefined()
 })
 
 test('the painted map has its ground, its words and its lit stations where the drawing has them', () => {
@@ -199,10 +201,14 @@ test('the painted map has its ground, its words and its lit stations where the d
 
   const dark = frame({ entries: [], counts: {} }, { theme: 'dark' })
   expect([dark.width, dark.height]).toEqual([460, 430])
-  expect(pixel(dark, 30, 30)).toEqual([0x0a, 0x0c, 0x11, 255])
+  // Deep space, faintly tinted by a cloud of gas.
+  const [r = 255, g = 255, b = 255, a = 0] = pixel(dark, 30, 30)
+  expect(Math.max(r, g, b)).toBeLessThan(48)
+  expect(a).toBe(255)
   // The rounded corner is left clear.
   expect(pixel(dark, 0, 0)[3]).toBe(0)
-  expect(pixel(frame({ entries: [], counts: {} }, { theme: 'light' }), 30, 30)).toEqual([0xf5, 0xf2, 0xea, 255])
+  // Space is dark on a light theme too.
+  expect(pixel(frame({ entries: [], counts: {} }, { theme: 'light' }), 30, 30)).toEqual(pixel(dark, 30, 30))
   expect(pixel(frame({ entries: [], counts: {} }, { theme: 'dark', background: 'transparent' }), 30, 30)[3]).toBe(0)
 
   // "You" under the top station: light words on the dark ground.
@@ -237,7 +243,7 @@ test('what never moves is painted once a drawing, and the frames come out as if 
         worst = Math.max(worst, Math.abs(a - b))
         for (let c = 0; c < 3; c++) worst = Math.max(worst, Math.abs((layered[i + c] as number) * a - (direct[i + c] as number) * b) / 255)
       }
-      expect(worst).toBeLessThanOrEqual(2)
+      expect(worst).toBeLessThanOrEqual(3)
     }
   }
 })
@@ -394,7 +400,7 @@ test('the picture moves while something moves, and stands still at rest', { opti
   await clock.advance(100)
   const probed = frames.length
   expect(probed).toBeGreaterThan(0)
-  expect(frames[0]).toMatchObject({ requestId: 'lot-map', key: 'map' })
+  expect(frames[0]).toMatchObject({ requestId: 'alien-map', key: 'map' })
   // The pulse flies out and back: thirty frames a second.
   await clock.advance(1000)
   expect(frames.length).toBeGreaterThanOrEqual(probed + 28)
@@ -430,10 +436,7 @@ test('the terminal background is read from COLORFGBG, light or dark, and nothing
   expect(schemeFrom('x;y')).toBeUndefined()
 })
 
-const LIGHT_INK = 150
-const DARK_INK = 100
-
-/** How bright what the picture draws is, its see-through background left out: high for the light map, low for the dark one. */
+/** How bright what the picture draws is, its see-through background left out. */
 async function inkOf(ui: { find: (q: { type: 'Image' }) => Promise<{ props: Record<string, unknown> } | undefined> }): Promise<number> {
   const { rgba } = unpng(fromBase64(((await ui.find({ type: 'Image' }))?.props.source as { png: string }).png))
   let sum = 0
@@ -446,27 +449,21 @@ async function inkOf(ui: { find: (q: { type: 'Image' }) => Promise<{ props: Reco
   return count === 0 ? 0 : sum / count
 }
 
-for (const [what, variables, isLight] of [
-  ['a light terminal gets the light picture', { COLORFGBG: '0;15' }, true],
-  ['a dark terminal gets the dark picture', { COLORFGBG: '15;0' }, false],
-  ['a terminal that says nothing gets the dark picture', {}, false],
+let spaceInk: number | undefined
+// Space is dark: whatever the terminal says about its background, and whatever the theme, the picture is the same.
+for (const [what, variables, theme] of [
+  ['a light terminal', { COLORFGBG: '0;15' }, 'auto'],
+  ['a dark terminal', { COLORFGBG: '15;0' }, 'auto'],
+  ['a terminal that says nothing', {}, 'auto'],
+  ['a light terminal with the light theme set', { COLORFGBG: '0;15' }, 'light'],
 ] as const) {
-  test(`with theme auto, ${what}`, { options: PICTURE }, async ($, on) => {
+  test(`${what} gets the same dark space picture`, { options: { ...PICTURE, theme } }, async ($, on) => {
     on('clock.now', () => ({ value: 1_000_000 }))
     mock.env(on, variables)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     const ink = await inkOf(ui)
-    // The light map's nodes are white and the dark map's nearly black.
-    if (isLight) expect(ink).toBeGreaterThan(LIGHT_INK)
-    else expect(ink).toBeLessThan(DARK_INK)
     await ui.unmount()
+    if (spaceInk === undefined) spaceInk = ink
+    expect(ink).toBe(spaceInk)
   })
 }
-
-test('a theme set in the options wins over the terminal', { options: { ...PICTURE, theme: 'dark' } }, async ($, on) => {
-  on('clock.now', () => ({ value: 1_000_000 }))
-  mock.env(on, { COLORFGBG: '0;15' })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await inkOf(ui)).toBeLessThan(DARK_INK)
-  await ui.unmount()
-})

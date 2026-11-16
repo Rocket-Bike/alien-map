@@ -1,12 +1,12 @@
 {
-  "name": "lot-map",
-  "description": "A live map of Claude Code's work, drawn beside the chat",
+  "name": "alien-map",
+  "description": "A space-themed live map of Claude Code's work, built on lot-map",
   "owner": {
-    "name": "alexeyw"
+    "name": "mrarick"
   },
   "plugins": [
     {
-      "name": "lot-map",
+      "name": "alien-map",
       "source": "./"
     }
   ]

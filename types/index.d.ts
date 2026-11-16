@@ -20,6 +20,8 @@ export type Entry = {
   task?: string
   /** A moment the map marks: the model changed, or the answer is ready. */
   mark?: 'switch' | 'done'
+  /** For a model step: the model's short name, such as `opus 5.5`. */
+  model?: string
 }
 
 export type Board = {
@@ -33,6 +35,8 @@ export type Board = {
   faults?: Partial<Record<StationId, number>>
   /** Subagents whose loops are still going. */
   agents?: string[]
+  /** Model steps per model, by short name, for the models column. */
+  models?: Record<string, number>
   /** How full the context window is, 0 to 100. */
   context?: number
   /** When the model last changed. */
@@ -47,6 +51,6 @@ export type Board = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'lot-map': { board: Shaped<Board> }
+    'alien-map': { board: Shaped<Board> }
   }
 }

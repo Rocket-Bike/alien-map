@@ -1,5 +1,17 @@
 # Changelog
 
+## alien-map 0.1.0
+
+Forked from lot-map 0.8.0.
+
+* A space scene: an orange alien in a UFO at the centre, a distinct planet for each station, a count on every planet.
+* Rockets instead of pulses: out from the saucer when a call starts, docked while it runs, home when it ends.
+* The alien's moods: watching, looking about, startled, asking, cheering, worried past 80% context, napping. Timed moods are written into the drawing.
+* A models column beside the rows: steps per model, lit while a step runs.
+* The terminal painter fills paths and ellipses.
+* Renamed to alien-map: its own pane, command and state.
+
+
 What changed in each version of lot-map, newest first. To get a new version, see [Updating](README.md#updating).
 
 ## 0.8.0 (2026-11-14)

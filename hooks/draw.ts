@@ -1,12 +1,16 @@
-// How the board is drawn: one SVG, the agent in the centre and a station for each kind of work.
-// Nothing here touches the engine.
+// How the board is drawn: one SVG, a space scene. An orange alien flies a UFO in the middle, each kind of work is a
+// planet on the ring around it, and every call is a small rocket that leaves the ship, docks at its planet while the
+// call runs and flies home when it ends. Nothing here touches the engine.
+//
+// Everything drawn stays inside what the terminal painter reads (raster.ts): rects, circles, ellipses, lines, paths
+// and text; animations of opacity, r and stroke-dashoffset, straight animateMotion and rotating groups. Expressions
+// and glances are crossfades of opacity, so they read the same in the desktop pane and in a terminal picture.
 import type { Board, Entry, StationId } from '../types'
 import { shortModel } from './classify'
-import { DARK, LIGHT, lightRules } from './palette'
+import { DARK } from './palette'
 import type { Palette } from './palette'
 import { STATIONS } from './setup'
 import type { Setup } from './setup'
-import type { Strings } from './text'
 
 const W = 460
 const H = 430
@@ -16,24 +20,41 @@ const CX = 230
 const CY = 212
 const RX = 176
 const RY = 164
-const NODE = 22
-const CORE = 40
-/** Where spokes and pulses meet the core: outside the context ring. */
-const HUB = CORE + 8
+/** A planet's radius. */
+const NODE = 19
+/** How much bigger than its drawn size the ship is shown. */
+const SHIP = 1.32
+/** The context ring around the ship. */
+const RING = 84
+/** The saucer's rim, where rockets leave and land, as shown. */
+const SAUCER = { x: CX, y: CY + 12 * SHIP, rx: 54 * SHIP, ry: 10 * SHIP }
+/** The saucer as drawn, before it is scaled up. */
+const DECK = { x: CX, y: CY + 12, rx: 54, ry: 10 }
 
 const FONT = 'font-family="SF Mono, ui-monospace, Menlo, monospace"'
 
 // The braille map keeps these times too, so that the two drawings of one board light and fade together.
 export const PULSE_MS = 800
-const RIPPLE_MS = 450
 export const GLOW_MS = 3200
 export const ALARM_MS = 6000
 export const SWITCH_MS = 8000
 export const DONE_MS = 1100
+/** How long a rocket takes between the ship and a planet, each way. */
+export const ROCKET_MS = 1300
+/** How long the alien celebrates an answer. */
+const CHEER_MS = 4500
+/** After this long with nothing going on, the alien dozes off. */
+const NAP_MS = 120_000
+/** One round of the alien looking about at the planets. */
+const LOOK_MS = 14_000
 const TRAIL_STOPS = 7
 /** A leg of the route stays for a while after it was drawn, then fades: the route shows where the work is going, and the spokes keep where it went. */
 export const TRAIL_HOLD_MS = 40_000
 export const TRAIL_FADE_MS = 20_000
+
+/** The space itself, the same whatever the theme: words stay light on it. */
+const SPACE = '#070b18'
+const SKIN = { main: '#d97757', shade: '#b85c3e', tip: '#f4a582', brow: '#6e2f1c', mouth: '#5a2414', eye: '#fff6ef', pupil: '#1a1020' }
 
 type Point = { x: number; y: number }
 
@@ -53,7 +74,13 @@ function edge(from: Point, to: Point, r: number): Point {
   return { x: from.x + ((to.x - from.x) * r) / d, y: from.y + ((to.y - from.y) * r) / d }
 }
 
-/** The same line moved sideways, so that several pulses on one spoke fly side by side. */
+/** Where the line from the saucer's middle towards `to` leaves its rim. */
+function rim(to: Point): Point {
+  const a = Math.atan2(to.y - SAUCER.y, to.x - SAUCER.x)
+  return { x: SAUCER.x + SAUCER.rx * Math.cos(a), y: SAUCER.y + SAUCER.ry * Math.sin(a) }
+}
+
+/** The same line moved sideways, so that several rockets on one lane fly side by side. */
 function aside(a: Point, b: Point, off: number): [Point, Point] {
   const d = Math.hypot(b.x - a.x, b.y - a.y) || 1
   const dx = (-(b.y - a.y) * off) / d
@@ -61,52 +88,327 @@ function aside(a: Point, b: Point, off: number): [Point, Point] {
   return [{ x: a.x + dx, y: a.y + dy }, { x: b.x + dx, y: b.y + dy }]
 }
 
-/** A pulse with a short tail behind it. A hollow one is a signal nobody asked for. */
-function pulse(a: Point, b: Point, color: string, age: number, radius: number, isHollow = false): string {
-  // A negative begin carries on where the last drawing left off, so a redraw never restarts a flight.
+const poly = (pts: readonly Point[], close = true): string =>
+  pts.map((p, k) => `${k === 0 ? 'M' : 'L'}${n1(p.x)} ${n1(p.y)}`).join('') + (close ? 'Z' : '')
+
+/** A seeded random, so the stars stand still from one drawing to the next. */
+function seeded(seed: number): () => number {
+  let s = seed >>> 0
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0
+    return s / 2 ** 32
+  }
+}
+
+// ---- planets ------------------------------------------------------------------------------------
+
+/** The part of a disc of radius 1 that the light does not reach, light coming from the upper left. Worked out once. */
+const SHADE: Point[] = (() => {
+  const L = { x: -0.38, y: -0.38 }
+  const LR = 1.14
+  const out: Point[] = []
+  const steps = 72
+  // The planet's own edge, where the light circle does not cover it, going round through the lower right.
+  const onEdge: Point[] = []
+  for (let k = 0; k <= steps; k++) {
+    const a = Math.PI / 4 - Math.PI + (2 * Math.PI * k) / steps
+    const p = { x: Math.cos(a), y: Math.sin(a) }
+    if (Math.hypot(p.x - L.x, p.y - L.y) >= LR) onEdge.push(p)
+  }
+  // Back along the light circle's edge, inside the planet.
+  const onLight: Point[] = []
+  for (let k = steps; k >= 0; k--) {
+    const a = Math.PI / 4 - Math.PI / 2 + (Math.PI * k) / steps
+    const p = { x: L.x + LR * Math.cos(a), y: L.y + LR * Math.sin(a) }
+    if (Math.hypot(p.x, p.y) <= 1) onLight.push(p)
+  }
+  out.push(...onEdge, ...onLight)
+  return out
+})()
+
+type Look = {
+  /** The planet's own color, for its lane, its glow and its count. */
+  accent: string
+  base: string
+  /** What lies on the disc, in its own units: the disc has radius 1 and its centre at 0, 0. */
+  bands?: [number, number, string, number?][]
+  spots?: [number, number, number, number, string, number?][]
+  craters?: [number, number, number][]
+  craterColor?: [string, string]
+  blobs?: [[number, number][], string, number?][]
+  cracks?: [[number, number][], string, number][]
+  /** A ring around the planet: its radii and its tilt in degrees. */
+  ring?: { rx: number; ry: number; tilt: number; color: string; inner: string }
+  /** A thin halo of air. */
+  air?: string
+}
+
+const LOOKS: Record<StationId, Look> = {
+  // Earth: you.
+  you: {
+    accent: '#6fb7ff',
+    base: '#2266cf',
+    blobs: [
+      [[[-0.78, -0.25], [-0.45, -0.62], [-0.08, -0.45], [-0.18, -0.12], [-0.42, 0.08], [-0.66, 0.02]], '#3f9b4c'],
+      [[[0.08, 0.12], [0.5, -0.12], [0.78, 0.18], [0.6, 0.55], [0.25, 0.62], [0.12, 0.38]], '#3f9b4c'],
+      [[[0.28, -0.6], [0.52, -0.66], [0.6, -0.44], [0.38, -0.38]], '#4caf50'],
+    ],
+    spots: [
+      [0, -0.88, 0.42, 0.13, '#f4f8ff', 0.95],
+      [-0.25, 0.38, 0.48, 0.07, '#ffffff', 0.75],
+      [0.3, -0.18, 0.38, 0.06, '#ffffff', 0.6],
+    ],
+    air: '#8fc7ff',
+  },
+  // Jupiter: the model.
+  model: {
+    accent: '#e8b98a',
+    base: '#d8b78a',
+    bands: [
+      [-0.82, -0.62, '#b07a4f'],
+      [-0.38, -0.22, '#ecdcbc'],
+      [-0.06, 0.12, '#a86a42'],
+      [0.34, 0.48, '#e6cfa7'],
+      [0.64, 0.8, '#b98557'],
+    ],
+    spots: [[0.32, 0.28, 0.27, 0.15, '#c1543a']],
+  },
+  // Neptune: memory.
+  memory: {
+    accent: '#7c9bff',
+    base: '#2f50c8',
+    bands: [
+      [-0.46, -0.34, '#4d72ee', 0.8],
+      [0.26, 0.34, '#4d72ee', 0.6],
+    ],
+    spots: [
+      [-0.24, 0.04, 0.26, 0.14, '#1a2c82'],
+      [0.22, -0.6, 0.3, 0.05, '#e8eeff', 0.85],
+    ],
+    air: '#8aa6ff',
+  },
+  // Mars: files.
+  files: {
+    accent: '#e2774f',
+    base: '#b8462a',
+    blobs: [[[[-0.7, 0.2], [-0.2, 0.05], [0.4, 0.25], [0.6, 0.5], [0.0, 0.62], [-0.55, 0.5]], '#9a3820', 0.8]],
+    craters: [
+      [-0.36, -0.22, 0.18],
+      [0.38, 0.12, 0.14],
+      [0.14, -0.5, 0.1],
+      [-0.08, 0.5, 0.1],
+    ],
+    craterColor: ['#8e321c', '#c9583a'],
+    spots: [[0, -0.86, 0.34, 0.13, '#f4ede6']],
+  },
+  // A lava world: the shell.
+  shell: {
+    accent: '#ff8a3d',
+    base: '#2b1814',
+    cracks: [
+      [[[-0.86, -0.2], [-0.42, -0.06], [-0.2, -0.4], [0.18, -0.2], [0.62, -0.34], [0.86, -0.22]], '#ff7a2e', 1.3],
+      [[[-0.66, 0.42], [-0.3, 0.3], [0.0, 0.56], [0.4, 0.36], [0.74, 0.48]], '#ff9a3d', 1.1],
+      [[[0.06, -0.06], [-0.02, 0.36]], '#ffb24d', 0.9],
+    ],
+    spots: [
+      [0.36, -0.56, 0.1, 0.1, '#ffc266'],
+      [-0.5, 0.1, 0.07, 0.07, '#ffb24d'],
+    ],
+  },
+  // Saturn: the network.
+  web: {
+    accent: '#ead9a0',
+    base: '#e3cf94',
+    bands: [
+      [-0.62, -0.46, '#cdb06a'],
+      [-0.16, -0.02, '#f0e2b6'],
+      [0.22, 0.42, '#c9a962'],
+      [0.6, 0.72, '#d8c17f'],
+    ],
+    ring: { rx: 1.72, ry: 0.42, tilt: -18, color: '#cdb277', inner: '#8e7a4e' },
+  },
+  // An ice moon: the browser.
+  browser: {
+    accent: '#bfe3f2',
+    base: '#d6ecf6',
+    cracks: [
+      [[[-0.76, -0.42], [-0.3, -0.24], [0.1, -0.36], [0.6, -0.16]], '#8db6cc', 0.9],
+      [[[-0.6, 0.36], [-0.2, 0.16], [0.24, 0.3], [0.7, 0.18]], '#8db6cc', 0.9],
+      [[[0.12, -0.84], [0.02, -0.2], [0.22, 0.5]], '#a7c8da', 0.8],
+    ],
+    craters: [[0.4, 0.12, 0.11]],
+    craterColor: ['#b4d2e2', '#e4f3fa'],
+  },
+  // A violet gas giant: agents. Its moons are the subagents at work.
+  agents: {
+    accent: '#b796f0',
+    base: '#6e45b8',
+    bands: [
+      [-0.66, -0.46, '#8c65d2'],
+      [-0.12, 0.06, '#5a3699'],
+      [0.3, 0.5, '#9d7adf', 0.8],
+    ],
+    spots: [[-0.24, -0.06, 0.36, 0.12, '#c2a6f5', 0.55]],
+  },
+  // Uranus: skills.
+  skills: {
+    accent: '#7fe0d3',
+    base: '#68cfc4',
+    bands: [
+      [-0.3, -0.2, '#86e2d8', 0.7],
+      [0.32, 0.4, '#58bdb2', 0.7],
+    ],
+    ring: { rx: 1.62, ry: 0.3, tilt: 80, color: '#a7efe6', inner: '#5fb8ae' },
+  },
+  // The Moon: hooks.
+  hooks: {
+    accent: '#c9c9ce',
+    base: '#9a9a9f',
+    blobs: [
+      [[[-0.6, -0.4], [-0.2, -0.5], [0.0, -0.2], [-0.3, 0.0], [-0.6, -0.1]], '#7c7c82'],
+      [[[0.1, 0.2], [0.45, 0.1], [0.6, 0.4], [0.3, 0.6], [0.05, 0.45]], '#808086'],
+    ],
+    craters: [
+      [0.42, -0.42, 0.14],
+      [-0.42, 0.42, 0.12],
+      [0.1, -0.7, 0.08],
+    ],
+    craterColor: ['#85858b', '#b1b1b6'],
+  },
+}
+
+/** The half of a ring behind the planet or the half in front of it, as two outlines. */
+function ringHalf(p: Point, look: Look, front: boolean): string {
+  const ring = look.ring
+  if (ring === undefined) return ''
+  const t = (ring.tilt * Math.PI) / 180
+  const outline = (rx: number, ry: number): Point[] => {
+    const pts: Point[] = []
+    for (let k = 0; k <= 24; k++) {
+      const a = (front ? 0 : Math.PI) + (Math.PI * k) / 24
+      const x = rx * NODE * Math.cos(a)
+      const y = ry * NODE * Math.sin(a)
+      pts.push({ x: p.x + x * Math.cos(t) - y * Math.sin(t), y: p.y + x * Math.sin(t) + y * Math.cos(t) })
+    }
+    return pts
+  }
+  return (
+    `<path d="${poly(outline(ring.rx, ring.ry), false)}" fill="none" stroke="${ring.color}" stroke-width="3" opacity="${front ? '.95' : '.7'}"/>` +
+    `<path d="${poly(outline(ring.rx * 0.8, ring.ry * 0.8), false)}" fill="none" stroke="${ring.inner}" stroke-width=".9" opacity="${front ? '.9' : '.6'}"/>`
+  )
+}
+
+/** A planet: its disc, what lies on it, and its night side. Its ring's back half is drawn by the caller, before it. */
+function planet(p: Point, look: Look): string {
+  const u = (x: number, y: number): Point => ({ x: p.x + x * NODE, y: p.y + y * NODE })
+  let out = `<circle cx="${n1(p.x)}" cy="${n1(p.y)}" r="${NODE}" fill="${look.base}"/>`
+  for (const [y1, y2, color, opacity] of look.bands ?? []) {
+    // A band runs edge to edge: its outline follows the disc's own edge between its two heights.
+    const side = (y: number): number => Math.sqrt(Math.max(0, 1 - y * y))
+    const pts: Point[] = []
+    for (let k = 0; k <= 6; k++) {
+      const y = y1 + ((y2 - y1) * k) / 6
+      pts.push(u(side(y), y))
+    }
+    for (let k = 6; k >= 0; k--) {
+      const y = y1 + ((y2 - y1) * k) / 6
+      pts.push(u(-side(y), y))
+    }
+    out += `<path d="${poly(pts)}" fill="${color}"${opacity !== undefined ? ` opacity="${opacity}"` : ''}/>`
+  }
+  for (const [pts, color, opacity] of look.blobs ?? []) {
+    out += `<path d="${poly(pts.map(([x, y]) => u(x, y)))}" fill="${color}"${opacity !== undefined ? ` opacity="${opacity}"` : ''} stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/>`
+  }
+  for (const [x, y, r] of look.craters ?? []) {
+    const [dark, light] = look.craterColor ?? ['#000000', '#ffffff']
+    const c = u(x, y)
+    out +=
+      `<circle cx="${n1(c.x)}" cy="${n1(c.y)}" r="${n1(r * NODE)}" fill="${dark}"/>` +
+      `<circle cx="${n1(c.x - r * NODE * 0.22)}" cy="${n1(c.y - r * NODE * 0.22)}" r="${n1(r * NODE * 0.62)}" fill="${light}"/>`
+  }
+  for (const [pts, color, width] of look.cracks ?? []) {
+    out += `<path d="${poly(pts.map(([x, y]) => u(x, y)), false)}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round"/>`
+  }
+  for (const [x, y, rx, ry, color, opacity] of look.spots ?? []) {
+    const c = u(x, y)
+    out += `<ellipse cx="${n1(c.x)}" cy="${n1(c.y)}" rx="${n1(rx * NODE)}" ry="${n1(ry * NODE)}" fill="${color}"${opacity !== undefined ? ` opacity="${opacity}"` : ''}/>`
+  }
+  out += `<path d="${poly(SHADE.map(s => u(s.x, s.y)))}" fill="#000000" opacity=".5"/>`
+  if (look.air !== undefined) out += `<circle cx="${n1(p.x)}" cy="${n1(p.y)}" r="${NODE + 1.2}" fill="none" stroke="${look.air}" stroke-width="1.2" opacity=".35"/>`
+  return out
+}
+
+// ---- rockets ------------------------------------------------------------------------------------
+
+/** A rocket pointing along `u`, its parts drawn around the origin, for animateMotion to carry. */
+function rocketParts(u: Point, nose: string, isHurt: boolean): { d: string; fill: string; isFlame?: boolean }[] {
+  const at = (a: number, s: number): Point => ({ x: a * u.x - s * u.y, y: a * u.y + s * u.x })
+  const shape = (pts: [number, number][]): string => poly(pts.map(([a, s]) => at(a, s)))
+  return [
+    { d: shape([[-6, 1.5], [-11.5, 0], [-6, -1.5]]), fill: '#ffb347', isFlame: true },
+    { d: shape([[-3, 2.3], [-7.2, 5], [-6, 2.3]]), fill: SKIN.main },
+    { d: shape([[-3, -2.3], [-7.2, -5], [-6, -2.3]]), fill: SKIN.main },
+    { d: shape([[8, 0], [4, 2.5], [-5, 2.5], [-6.2, 0], [-5, -2.5], [4, -2.5]]), fill: isHurt ? '#e8654f' : '#e8ecf8' },
+    { d: shape([[8, 0], [4.4, 2.3], [4.4, -2.3]]), fill: nose },
+    { d: shape([[1.9, 0], [1.1, 1.1], [-0.2, 1.1], [-0.9, 0], [-0.2, -1.1], [1.1, -1.1]]), fill: '#2b5fc4' },
+  ]
+}
+
+/** A rocket on its way from `a` to `b`, `age` ms into a trip of ROCKET_MS. */
+function rocket(a: Point, b: Point, nose: string, age: number, isHurt: boolean): string {
+  const d = Math.hypot(b.x - a.x, b.y - a.y) || 1
+  const u = { x: (b.x - a.x) / d, y: (b.y - a.y) / d }
+  const timing = `begin="${clock(-age)}" dur="${clock(ROCKET_MS)}" fill="freeze"`
+  const motion = `<animateMotion path="M${n1(a.x)} ${n1(a.y)}L${n1(b.x)} ${n1(b.y)}" ${timing}/>`
+  return rocketParts(u, nose, isHurt)
+    .map(
+      part =>
+        `<path d="${part.d}" fill="${part.fill}" opacity="0">${motion}` +
+        (part.isFlame
+          ? `<animate attributeName="opacity" values=".95;.45;.95;.45;.95;.45;.9;0" keyTimes="0;.14;.28;.42;.56;.7;.88;1" ${timing}/>`
+          : `<animate attributeName="opacity" values="1;1;0" keyTimes="0;.9;1" ${timing}/>`) +
+        `</path>`,
+    )
+    .join('')
+}
+
+/** A rocket parked beside its planet while the call runs, pointing back at the ship. */
+function docked(p: Point, toward: Point, nose: string): string {
+  const d = Math.hypot(toward.x - p.x, toward.y - p.y) || 1
+  const u = { x: (p.x - toward.x) / d, y: (p.y - toward.y) / d }
+  const spot = { x: p.x - u.x * (NODE + 8), y: p.y - u.y * (NODE + 8) }
+  return rocketParts(u, nose, false)
+    .filter(part => !part.isFlame)
+    .map(part => `<path transform="translate(${n1(spot.x)} ${n1(spot.y)})" d="${part.d}" fill="${part.fill}"/>`)
+    .join('')
+}
+
+/** A signal coming in from a planet to the ship: a hollow spark with a short tail. */
+function spark(a: Point, b: Point, color: string, age: number): string {
   const path = `M${n1(a.x)} ${n1(a.y)}L${n1(b.x)} ${n1(b.y)}`
   let out = ''
-  for (let k = isHollow ? 0 : 2; k >= 0; k--) {
-    const timing = `begin="${clock(k * 45 - age)}" dur="${clock(PULSE_MS)}" fill="freeze"`
-    const peak = n1(1 - 0.36 * k)
-    const paint = isHollow ? `fill="none" stroke="${color}" stroke-width="1.4"` : `fill="${color}"`
+  for (let k = 0; k <= 1; k++) {
+    const timing = `begin="${clock(k * 60 - age)}" dur="${clock(PULSE_MS)}" fill="freeze"`
     out +=
-      `<circle r="${n1(radius * (1 - 0.27 * k))}" ${paint} opacity="0">` +
+      `<circle r="${n1(3.6 - k)}" fill="none" stroke="${color}" stroke-width="1.4" opacity="0">` +
       `<animateMotion path="${path}" ${timing}/>` +
-      `<animate attributeName="opacity" values="${peak};${peak};0" keyTimes="0;.82;1" ${timing}/>` +
-      `</circle>`
+      `<animate attributeName="opacity" values="1;1;0" keyTimes="0;.82;1" ${timing}/></circle>`
   }
   return out
 }
 
-/** A ring that spreads from where a pulse lands, at the moment it lands. */
-function ripple(p: Point, r: number, color: string, age: number): string {
-  const timing = `begin="${clock(PULSE_MS - age)}" dur="${clock(RIPPLE_MS)}" fill="freeze"`
-  return (
-    `<circle cx="${n1(p.x)}" cy="${n1(p.y)}" r="${r}" fill="none" stroke="${color}" stroke-width="1.2" opacity="0">` +
-    `<animate attributeName="r" values="${r};${r + 11}" ${timing}/>` +
-    `<animate attributeName="opacity" values=".7;0" ${timing}/></circle>`
-  )
-}
+// ---- the route ----------------------------------------------------------------------------------
 
-function beam(a: Point, b: Point, color: string, age: number, isDashed: boolean): string {
-  return (
-    `<line x1="${n1(a.x)}" y1="${n1(a.y)}" x2="${n1(b.x)}" y2="${n1(b.y)}" stroke="${color}" stroke-width="1.4"${isDashed ? ' stroke-dasharray="3 4"' : ''} opacity="0">` +
-    `<animate attributeName="opacity" values=".75;0" begin="${clock(-age)}" dur="${clock(GLOW_MS / 2)}" fill="freeze"/></line>`
-  )
-}
-
-/** How far from the core a leg bends, by how many stations apart its ends are: far enough in to clear the labels under the nodes, far enough out to clear the core. */
+/** How far from the centre a leg bends, by how many stations apart its ends are. */
 const BEND = [0.5, 0.5, 0.4, 0.45, 0.55, 0.75]
 
-/** The way from one station to another: a curve through the room between the core and the ring. */
 function leg(i: number, j: number, shift: number): { path: string; end: Point } {
   const n = STATIONS.length
   let steps = (((j - i) % n) + n) % n
   if (steps > n / 2) steps -= n
   const bend = at(turn(i + steps / 2, shift), BEND[Math.abs(steps)] ?? 0.5)
-  const a = edge(place(i, shift), bend, NODE + 4)
-  const b = edge(place(j, shift), bend, NODE + 4)
+  const a = edge(place(i, shift), bend, NODE + 6)
+  const b = edge(place(j, shift), bend, NODE + 6)
   return { path: `M${n1(a.x)} ${n1(a.y)}Q${n1(bend.x)} ${n1(bend.y)} ${n1(b.x)} ${n1(b.y)}`, end: b }
 }
 
@@ -133,30 +435,31 @@ function trail(entries: readonly Entry[], now: number, c: Palette, isStill: bool
     const isHead = k === stops.length - 1
     const age = now - to.at
     if (age >= TRAIL_HOLD_MS + TRAIL_FADE_MS) continue
-    const opacity = n1(0.12 + (0.5 * k) / (stops.length - 1))
-    // The fading is written into the drawing, so a leg goes out on time even when nothing redraws the map.
+    const opacity = n1(0.08 + (0.32 * k) / (stops.length - 1))
     const fade = `<animate attributeName="opacity" values="${opacity};0" begin="${clock(TRAIL_HOLD_MS - age)}" dur="${clock(TRAIL_FADE_MS)}" fill="freeze"/>`
-    // The newest leg draws itself; the rest are already there.
     const drawing = isHead && !isStill
       ? ` pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1"><animate attributeName="stroke-dashoffset" values="1;0" begin="${clock(to.at - now)}" dur=".5s" fill="freeze"/>`
       : '>'
-    out += `<path d="${path}" fill="none" stroke="${c.trail}" stroke-width="${isHead ? 1.5 : 1.1}" stroke-linecap="round" opacity="${opacity}"${drawing}${fade}</path>`
+    out += `<path d="${path}" fill="none" stroke="${c.trail}" stroke-width="${isHead ? 1.3 : 1}" stroke-linecap="round" opacity="${opacity}"${drawing}${fade}</path>`
     if (isHead) {
       out +=
-        `<circle cx="${n1(end.x)}" cy="${n1(end.y)}" r="2.4" fill="${c.trail}" opacity="${isStill ? '.85' : '0'}">` +
-        (isStill ? '' : `<animate attributeName="opacity" values="0;.85" begin="${clock(to.at - now + 400)}" dur=".15s" fill="freeze"/>`) +
-        `<animate attributeName="opacity" values=".85;0" begin="${clock(TRAIL_HOLD_MS - age)}" dur="${clock(TRAIL_FADE_MS)}" fill="freeze"/></circle>`
+        `<circle cx="${n1(end.x)}" cy="${n1(end.y)}" r="2.2" fill="${c.trail}" opacity="${isStill ? '.7' : '0'}">` +
+        (isStill ? '' : `<animate attributeName="opacity" values="0;.7" begin="${clock(to.at - now + 400)}" dur=".15s" fill="freeze"/>`) +
+        `<animate attributeName="opacity" values=".7;0" begin="${clock(TRAIL_HOLD_MS - age)}" dur="${clock(TRAIL_FADE_MS)}" fill="freeze"/></circle>`
     }
   }
   return out
 }
 
-type Scene = { entries: Entry[]; board: Board; now: number; c: Palette; names: Strings['stations']; isStill: boolean; shift: number }
+// ---- the stations -------------------------------------------------------------------------------
 
-function station(s: (typeof STATIONS)[number], i: number, { entries, board, now, c, names, isStill, shift }: Scene): { under: string; over: string } {
+type Scene = { entries: Entry[]; board: Board; now: number; c: Palette; names: Record<StationId, string>; isStill: boolean; shift: number }
+
+function station(s: (typeof STATIONS)[number], i: number, { entries, board, now, c, names, isStill, shift }: Scene): { under: string; body: string; over: string } {
   const p = place(i, shift)
   const x = n1(p.x)
   const y = n1(p.y)
+  const look = LOOKS[s.id]
   const count = board.counts[s.id] ?? 0
   const own = entries.filter(e => e.station === s.id)
   const running = own.filter(e => e.status === 'run')
@@ -166,8 +469,7 @@ function station(s: (typeof STATIONS)[number], i: number, { entries, board, now,
   const alarmAge = alarm === undefined ? Infinity : now - (alarm.endedAt ?? alarm.startedAt)
   const isAlarm = alarmAge < ALARM_MS
   const isLit = running.length > 0 || since < GLOW_MS
-  const [main, hot] = s.id === 'memory' ? [c.mem, c.memHot] : [c.accent, c.hot]
-  const color = isAlarm ? c.red : main
+  const color = isAlarm ? c.red : look.accent
   const fade = isAlarm ? alarmAge : since
   const span = isAlarm ? ALARM_MS : GLOW_MS
 
@@ -175,104 +477,356 @@ function station(s: (typeof STATIONS)[number], i: number, { entries, board, now,
   if (isLit || isAlarm) {
     under +=
       running.length > 0 && !isAlarm
-        ? `<circle cx="${x}" cy="${y}" r="${NODE + 10}" fill="${color}" opacity=".16"/>`
-        : `<circle cx="${x}" cy="${y}" r="${NODE + 10}" fill="${color}" opacity="0">` +
-          `<animate attributeName="opacity" values=".3;0" begin="${clock(-fade)}" dur="${clock(span)}" fill="freeze"/></circle>`
+        ? `<circle cx="${x}" cy="${y}" r="${NODE + 11}" fill="${color}" opacity=".14"/>`
+        : `<circle cx="${x}" cy="${y}" r="${NODE + 11}" fill="${color}" opacity="0">` +
+          `<animate attributeName="opacity" values=".28;0" begin="${clock(-fade)}" dur="${clock(span)}" fill="freeze"/></circle>`
   }
   if (running.length > 0) {
     const elapsed = now - Math.min(...running.map(e => e.startedAt))
     const beat = `begin="${clock(-(elapsed % 1400))}" dur="1.4s" repeatCount="indefinite"`
-    // The beat is a ring that spreads: with reduced motion the steady halo and the clock hands say the same.
     if (!isStill) {
       under +=
-        `<circle cx="${x}" cy="${y}" r="${NODE}" fill="none" stroke="${color}" stroke-width="1.3">` +
-        `<animate attributeName="r" values="${NODE};${NODE + 15}" ${beat}/>` +
-        `<animate attributeName="opacity" values=".9;0" ${beat}/></circle>`
+        `<circle cx="${x}" cy="${y}" r="${NODE + 2}" fill="none" stroke="${color}" stroke-width="1.2">` +
+        `<animate attributeName="r" values="${NODE + 2};${NODE + 16}" ${beat}/>` +
+        `<animate attributeName="opacity" values=".8;0" ${beat}/></circle>`
     }
-    // Two hands of a clock around the node: the inner one goes round in a minute, the outer one in ten.
+    // Two hands of a clock around the planet: the inner one goes round in a minute, the outer one in ten.
     const hand = (r: number, width: number, lapMs: number, isOnce: boolean): string =>
-      `<circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="${hot}" stroke-width="${width}" pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1" transform="rotate(-90 ${x} ${y})">` +
+      `<circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="${color}" stroke-width="${width}" pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1" transform="rotate(-90 ${x} ${y})">` +
       `<animate attributeName="stroke-dashoffset" values="1;0" begin="${clock(-(isOnce ? Math.min(elapsed, lapMs) : elapsed % lapMs))}" dur="${clock(lapMs)}" ${isOnce ? 'fill="freeze"' : 'repeatCount="indefinite"'}/></circle>`
-    under += hand(NODE + 4, 2.2, 60_000, false) + hand(NODE + 8, 1.2, 600_000, true)
+    under += hand(NODE + 5, 2, 60_000, false) + hand(NODE + 9, 1.1, 600_000, true)
   }
 
-  // A lit node wears a ring of its color while something runs; afterwards the ring fades back to the resting line.
-  const lit = `<circle cx="${x}" cy="${y}" r="${NODE}" fill="none" stroke="${color}" stroke-width="1.2"`
-  const cooling =
-    running.length > 0
-      ? `${lit}/>`
-      : isLit || isAlarm
-        ? `${lit} opacity="0"><animate attributeName="opacity" values="1;0" begin="${clock(-fade)}" dur="${clock(span)}" fill="freeze"/></circle>`
-        : ''
-  const glyphColor = isAlarm ? c.red : isLit ? hot : s.id === 'memory' && count > 0 ? main : c.ash
-  // The words stand on a rim of the ground's own color, so a line that passes behind them never strikes them through.
-  const rim = `paint-order="stroke" stroke="${c.ground}" stroke-width="3.5" stroke-linejoin="round"`
-  let over =
-    `<circle cx="${x}" cy="${y}" r="${NODE}" fill="${c.raised}" stroke="${c.line}" stroke-width="1.2"/>${cooling}` +
-    `<path transform="translate(${x} ${y})" d="${s.icon}" fill="none" stroke="${glyphColor}" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>` +
-    `<text x="${x}" y="${n1(p.y + NODE + 15)}" text-anchor="middle" ${FONT} font-size="11.5" ${rim} fill="${isLit || isAlarm ? c.bone : c.ash}">${names[s.id]}</text>`
+  const body = ringHalf(p, look, false) + planet(p, look) + ringHalf(p, look, true)
 
-  if (count > 0) {
-    // Memory keeps two counts: what was asked for, and what a hook brought down unasked.
-    const pushed = s.id === 'memory' ? Math.min(count, board.pushed ?? 0) : 0
-    const asked = count - pushed
-    const figures =
-      pushed === 0 ? String(count) : `${asked > 0 ? `${asked} ` : ''}<tspan fill="${main}">↓${pushed}</tspan>`
-    over += `<text x="${x}" y="${n1(p.y + NODE + 28)}" text-anchor="middle" ${FONT} font-size="9.5" ${rim} fill="${c.dim}">${figures}</text>`
-  }
+  // The words stand on a rim of the space's own color, so a line that passes behind them never strikes them through.
+  const rimmed = `paint-order="stroke" stroke="${SPACE}" stroke-width="3.5" stroke-linejoin="round"`
+  let over = `<text x="${x}" y="${n1(p.y + NODE + 16)}" text-anchor="middle" ${FONT} font-size="11.5" ${rimmed} fill="${isLit || isAlarm ? c.bone : c.ash}">${names[s.id]}</text>`
 
-  // Top right: how many run at once. Top left: what went wrong since the last message, until the next one.
-  const corner = NODE * 0.74
-  if (running.length > 1) {
-    over +=
-      `<circle cx="${n1(p.x + corner)}" cy="${n1(p.y - corner)}" r="8" fill="${c.raised}" stroke="${color}" stroke-width="1"/>` +
-      `<text x="${n1(p.x + corner)}" y="${n1(p.y - corner + 3)}" text-anchor="middle" ${FONT} font-size="8.5" fill="${hot}">×${running.length}</text>`
-  }
+  // Top left: how many times the planet was visited.
+  const figure = count > 999 ? '999+' : String(count)
+  const wide = 7 + figure.length * 6
+  const tag = { x: p.x - NODE - wide + 6, y: p.y - NODE - 6 }
+  over +=
+    `<rect x="${n1(tag.x)}" y="${n1(tag.y)}" width="${wide}" height="13" rx="4" fill="${c.raised}" stroke="${count > 0 ? look.accent : c.line}" stroke-width=".8"/>` +
+    `<text x="${n1(tag.x + wide / 2)}" y="${n1(tag.y + 9.6)}" text-anchor="middle" ${FONT} font-size="9.5" fill="${count > 0 ? look.accent : c.dim}">${figure}</text>`
+
+  // Top right: what went wrong since the last message. Bottom right: how many run at once.
+  const corner = NODE * 0.8
   const faults = board.faults?.[s.id] ?? 0
   if (faults > 0) {
     over +=
-      `<circle cx="${n1(p.x - corner)}" cy="${n1(p.y - corner)}" r="7.5" fill="${c.red}"/>` +
-      `<text x="${n1(p.x - corner)}" y="${n1(p.y - corner + 3.1)}" text-anchor="middle" ${FONT} font-size="9" font-weight="700" fill="${c.ground}">${faults > 99 ? '99+' : faults}</text>`
+      `<circle cx="${n1(p.x + corner)}" cy="${n1(p.y - corner)}" r="7.5" fill="${c.red}"/>` +
+      `<text x="${n1(p.x + corner)}" y="${n1(p.y - corner + 3.1)}" text-anchor="middle" ${FONT} font-size="9" font-weight="700" fill="${SPACE}">${faults > 99 ? '99+' : faults}</text>`
   }
-  return { under, over }
+  if (running.length > 1) {
+    over +=
+      `<circle cx="${n1(p.x + corner)}" cy="${n1(p.y + corner)}" r="8" fill="${c.raised}" stroke="${color}" stroke-width="1"/>` +
+      `<text x="${n1(p.x + corner)}" y="${n1(p.y + corner + 3)}" text-anchor="middle" ${FONT} font-size="8.5" fill="${color}">×${running.length}</text>`
+  }
+  return { under, body, over }
 }
 
+// ---- the ship and its pilot ---------------------------------------------------------------------
 
-export function drawMap(board: Board, now: number, setup: Setup): string {
-  const c: Palette = { ...(setup.theme === 'light' ? LIGHT : DARK), ...setup.colors }
-  // How many places the ring is turned. The stations keep their order, so the far side of the person is always the network.
-  const shift = setup.layout === 'you-bottom' ? STATIONS.length / 2 : 0
-  const core: Point = { x: CX, y: CY }
-  const recent = board.entries.slice(-40)
-  // With reduced motion nothing flies, spreads or spins. A call still shows: its spoke flashes and fades, its station
-  // lights and cools, the route gets its leg; those only change their opacity. The clock hands stay, as slow as a clock's.
-  const isStill = setup.motion === 'reduced'
-  const flights = isStill ? [] : recent.filter(e => now - e.startedAt < PULSE_MS + RIPPLE_MS).slice(-14)
-  const returns = isStill ? [] : recent.filter(e => e.endedAt !== undefined && e.from !== 'inbound' && now - e.endedAt < PULSE_MS + RIPPLE_MS).slice(-14)
-  const beams = recent.filter(e => now - e.startedAt < GLOW_MS / 2).slice(-10)
-  const anyRunning = recent.some(e => e.status === 'run')
-  const agentsAt = place(indexOf('agents'), shift)
-  const isBad = (e: Entry): boolean => e.status === 'block' || e.status === 'err'
-  const tone = (e: Entry): [string, string] => (e.station === 'memory' ? [c.mem, c.memHot] : [c.accent, c.hot])
+/**
+ * How the pilot feels, as windows of time from the moment of drawing, in ms. The pane draws again only when the board
+ * changes, so a mood that ends or starts on its own (a fright, a cheer, a nap) is written into the drawing as when.
+ */
+type Mood = {
+  isWorried: boolean
+  /** Waiting on the person: lasts until the board changes. */
+  isAsking: boolean
+  /** Something went wrong: shows until then. 0 or less, not at all. */
+  startledFor: number
+  /** An answer is ready: cheers until then. */
+  cheerFor: number
+  /** When it dozes off, if nothing happens before; Infinity, not while this drawing stands. */
+  napAt: number
+  /** The planet whose work runs, to watch. */
+  focus: Point | undefined
+}
 
-  // Without its ground the map keeps the rim around its words, in the ground's color: a faint halo on a surface of another shade.
-  let body = setup.background === 'transparent' ? '' : `<rect width="${W}" height="${H}" rx="12" fill="${c.ground}"/>`
+/**
+ * Every shape in `svg` shown only between `from` and `until` ms from now; outside that its opacity is held at 0. Both
+ * edges are moments, not animations that run in between, so a terminal painter sleeps until each one. A shape that
+ * animates its own opacity must begin doing so at `from` or later.
+ */
+function windowed(svg: string, from: number, until: number): string {
+  if (from <= 0 && until === Infinity) return svg
+  if (until <= 0 || until <= from) return ''
+  const hide = until !== Infinity ? `<animate attributeName="opacity" values="0;0" begin="${clock(until)}" dur=".001s" fill="freeze"/>` : ''
+  return svg.replace(/<(circle|ellipse|path|line|rect|text)\b([^>]*?)(\/?)>/g, (_, tag: string, attrs: string, self: string) => {
+    let own = attrs
+    let show = ''
+    if (from > 0) {
+      // Unseen until it starts, then at its own opacity.
+      const was = /\sopacity="([^"]*)"/.exec(attrs)?.[1] ?? '1'
+      own = /\sopacity="/.test(attrs) ? attrs.replace(/\sopacity="[^"]*"/, ' opacity="0"') : `${attrs} opacity="0"`
+      show = `<animate attributeName="opacity" values="${was};${was}" begin="${clock(from)}" dur=".001s" fill="freeze"/>`
+    }
+    return self === '/' ? `<${tag}${own}>${show}${hide}</${tag}>` : `<${tag}${own}>${show}${hide}`
+  })
+}
 
-  // Contours around the core.
-  for (const [rx, ry] of [[66, 62], [104, 97], [142, 132]]) {
-    body += `<ellipse cx="${CX}" cy="${CY}" rx="${rx}" ry="${ry}" fill="none" stroke="${c.line}" stroke-width=".7" opacity=".45" stroke-dasharray="2 5"/>`
+/** The alien's face, in its UFO. Glances and expressions crossfade by opacity on clocks that carry on between drawings. */
+function pilot(mood: Mood, now: number, isStill: boolean, targets: Point[]): string {
+  const head = { x: CX, y: CY - 8 }
+  const eyes = [{ x: CX - 6.2, y: CY - 9.5 }, { x: CX + 6.2, y: CY - 9.5 }]
+  const toward = (p: Point, reach: number): Point => {
+    const a = Math.atan2(p.y - CY, p.x - CX)
+    return { x: Math.cos(a) * reach, y: Math.sin(a) * reach * 0.85 }
+  }
+  const pupils = (off: Point, opacity: string, anim = ''): string =>
+    eyes.map(e => `<circle cx="${n1(e.x + off.x)}" cy="${n1(e.y + off.y)}" r="2.2" fill="${SKIN.pupil}" opacity="${opacity}">${anim}</circle>`).join('')
+  type Brow = [number, number, number, number]
+  const brows = (left: Brow, right: Brow, opacity: string, anim = ''): string =>
+    [left, right]
+      .map(([x1, y1, x2, y2]) => `<line x1="${n1(CX + x1)}" y1="${n1(CY + y1)}" x2="${n1(CX + x2)}" y2="${n1(CY + y2)}" stroke="${SKIN.brow}" stroke-width="1.5" stroke-linecap="round" opacity="${opacity}">${anim}</line>`)
+      .join('')
+  const mouth = (d: string, opacity: string, anim = ''): string =>
+    `<path d="${d}" fill="none" stroke="${SKIN.mouth}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}">${anim}</path>`
+  const SMILE = `M${CX - 4.5} ${CY - 1.5}Q${CX} ${CY + 2.5} ${CX + 4.5} ${CY - 1.5}`
+  const GRIN = `M${CX - 6} ${CY - 2.5}Q${CX} ${CY + 4.5} ${CX + 6} ${CY - 2.5}`
+  const HMM = `M${CX - 3} ${CY}Q${CX + 0.5} ${CY - 1} ${CX + 4} ${CY - 1.6}`
+  const WAVY = `M${CX - 5} ${CY}Q${CX - 2.5} ${CY - 2} ${CX} ${CY}Q${CX + 2.5} ${CY + 2} ${CX + 5} ${CY}`
+  const FLAT: [Brow, Brow] = [[-10, -17, -3, -17], [3, -17, 10, -17]]
+  const UP_BROW: Brow = [3, -19.5, 10, -18]
+  const WORRY: [Brow, Brow] = [[-10, -16.5, -3, -19], [3, -19, 10, -16.5]]
+  const LIFT: [Brow, Brow] = [[-10, -19, -3, -19.5], [3, -19.5, 10, -19]]
+
+  // How long the passing mood holds, and so when the resting face takes over.
+  const passing = mood.isAsking ? Infinity : Math.max(mood.startledFor, mood.cheerFor, 0)
+  const isFrightened = mood.isAsking || mood.startledFor > 0
+  const napAt = mood.isWorried ? Infinity : mood.napAt
+
+  let out = ''
+  // Antennae with glowing tips, then the head: always there, awake or asleep.
+  for (const side of [-1, 1]) {
+    const tip = { x: CX + side * 9, y: CY - 25 }
+    out += `<line x1="${n1(CX + side * 4)}" y1="${n1(CY - 18)}" x2="${n1(tip.x)}" y2="${n1(tip.y)}" stroke="${SKIN.main}" stroke-width="1.6" stroke-linecap="round"/>`
+    out += `<circle cx="${n1(tip.x)}" cy="${n1(tip.y)}" r="2.6" fill="${SKIN.tip}"/>`
+    if (!isStill) {
+      const pulse = `begin="${clock(-((now + (side + 1) * 350) % 1800))}" dur="1.8s" repeatCount="indefinite"`
+      out += `<circle cx="${n1(tip.x)}" cy="${n1(tip.y)}" r="2.6" fill="${SKIN.tip}" opacity=".4"><animate attributeName="r" values="2.6;5;2.6" ${pulse}/><animate attributeName="opacity" values=".45;0;.45" ${pulse}/></circle>`
+    }
+  }
+  out += `<ellipse cx="${CX}" cy="${CY + 4}" rx="11" ry="8" fill="${SKIN.shade}"/>`
+  out += `<ellipse cx="${head.x}" cy="${head.y}" rx="16" ry="13.5" fill="${SKIN.main}"/>`
+  out += `<ellipse cx="${head.x - 5}" cy="${head.y - 6}" rx="6" ry="3" fill="${SKIN.tip}" opacity=".35"/>`
+
+  // Awake: the eyes, and where they go.
+  let awake = eyes.map(e => `<ellipse cx="${n1(e.x)}" cy="${n1(e.y)}" rx="4.4" ry="5.2" fill="${SKIN.eye}"/>`).join('')
+  const lookAbout = !isStill && mood.focus === undefined && passing <= 0 && !mood.isWorried
+  if (mood.focus !== undefined) {
+    awake += pupils(toward(mood.focus, 1.9), '1')
+  } else if (mood.isWorried && !isStill) {
+    const dart = `begin="${clock(-(now % 1500))}" dur="1.5s" repeatCount="indefinite"`
+    awake += pupils({ x: -1.6, y: 0.4 }, '0', `<animate attributeName="opacity" values="1;1;0;0;1" keyTimes="0;.45;.5;.95;1" ${dart}/>`)
+    awake += pupils({ x: 1.6, y: 0.4 }, '0', `<animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;.45;.5;.95;1" ${dart}/>`)
+  } else if (lookAbout) {
+    // One round: ahead, a long thoughtful look at one planet, ahead, a look at another, ahead.
+    const round = Math.floor(now / LOOK_MS)
+    const pick = seeded(round * 7919 + 17)
+    const a = targets[Math.floor(pick() * targets.length)] ?? { x: CX + 1, y: CY }
+    const b = targets[Math.floor(pick() * targets.length)] ?? { x: CX - 1, y: CY }
+    const look = `begin="${clock(-(now % LOOK_MS))}" dur="${clock(LOOK_MS)}" repeatCount="indefinite"`
+    const KT = '0;.18;.2;.38;.4;.6;.62;.74;.76;1'
+    awake += pupils({ x: 0, y: 0 }, '1', `<animate attributeName="opacity" values="1;1;0;0;1;1;0;0;1;1" keyTimes="${KT}" ${look}/>`)
+    awake += pupils(toward(a, 1.9), '0', `<animate attributeName="opacity" values="0;0;1;1;0;0;0;0;0;0" keyTimes="${KT}" ${look}/>`)
+    awake += pupils(toward(b, 1.9), '0', `<animate attributeName="opacity" values="0;0;0;0;0;0;1;1;0;0" keyTimes="${KT}" ${look}/>`)
+    // While it looks, it wonders: one brow up, a sideways mouth and a few thought dots.
+    const on = `values="0;0;1;1;0;0;1;1;0;0" keyTimes="${KT}" ${look}`
+    const off = `values="1;1;0;0;1;1;0;0;1;1" keyTimes="${KT}" ${look}`
+    awake += brows(FLAT[0], FLAT[1], '1', `<animate attributeName="opacity" ${off}/>`)
+    awake += brows(FLAT[0], UP_BROW, '0', `<animate attributeName="opacity" ${on}/>`)
+    awake += mouth(SMILE, '1', `<animate attributeName="opacity" ${off}/>`)
+    awake += mouth(HMM, '0', `<animate attributeName="opacity" ${on}/>`)
+    ;[[CX + 19, CY - 19, 1.5], [CX + 24, CY - 25, 2.1], [CX + 30, CY - 32, 2.8]].forEach(([dx, dy, r], k) => {
+      awake += `<circle cx="${dx}" cy="${dy}" r="${r}" fill="${c0.bone}" opacity="0"><animate attributeName="opacity" values="0;0;${k === 0 ? 1 : 0};1;0;0;${k === 0 ? 1 : 0};1;0;0" keyTimes="${KT}" ${look}/></circle>`
+    })
+  } else {
+    awake += pupils({ x: 0, y: 0 }, '1')
+  }
+  // Blinks: the lids close for a moment every few seconds.
+  if (!isStill) {
+    const blink = `begin="${clock(-(now % 4300))}" dur="4.3s" repeatCount="indefinite"`
+    awake += eyes.map(e => `<ellipse cx="${n1(e.x)}" cy="${n1(e.y)}" rx="4.8" ry="5.6" fill="${SKIN.main}" opacity="0"><animate attributeName="opacity" values="0;0;1;0" keyTimes="0;.95;.975;1" ${blink}/></ellipse>`).join('')
+  }
+  if (mood.isWorried) {
+    // Heavy lids over the top of each eye.
+    awake += eyes.map(e => `<path d="M${n1(e.x - 4.6)} ${n1(e.y - 1.6)}Q${n1(e.x)} ${n1(e.y - 7.2)} ${n1(e.x + 4.6)} ${n1(e.y - 1.6)}Z" fill="${SKIN.main}"/>`).join('')
+  }
+  out += windowed(awake, 0, napAt)
+
+  // The passing mood: a fright or a question, else a cheer.
+  if (isFrightened) {
+    const until = mood.isAsking ? napAt : Math.min(mood.startledFor, napAt)
+    out += windowed(brows(LIFT[0], LIFT[1], '1') + `<ellipse cx="${CX}" cy="${CY - 0.5}" rx="2.4" ry="2.9" fill="none" stroke="${SKIN.mouth}" stroke-width="1.5"/>`, 0, until)
+  } else if (mood.cheerFor > 0) {
+    out += windowed(brows(LIFT[0], LIFT[1], '1') + mouth(GRIN, '1'), 0, Math.min(mood.cheerFor, napAt))
   }
 
-  // Spokes first, then whatever flies along them, then the nodes on top.
-  // A spoke wears in with use: by the end of a session the map shows where the work went.
+  // The resting face, once the passing mood is over: worried, or calm. Looking about has drawn its own.
+  let rest = ''
+  if (mood.isWorried) {
+    rest += brows(WORRY[0], WORRY[1], '1') + mouth(WAVY, '1')
+    // A drop of sweat that runs down and comes again.
+    rest += isStill
+      ? `<path transform="translate(${CX + 15} ${CY - 15})" d="M0 -3Q2.4 0.6 0 2.6Q-2.4 0.6 0 -3Z" fill="#8fd3ff" opacity=".9"/>`
+      : `<path d="M0 -3Q2.4 0.6 0 2.6Q-2.4 0.6 0 -3Z" fill="#8fd3ff" opacity="0">` +
+        `<animateMotion path="M${CX + 15} ${CY - 16}L${CX + 15} ${CY - 6}" begin="${clock(passing > 0 ? passing : -(now % 1600))}" dur="1.6s" repeatCount="indefinite"/>` +
+        `<animate attributeName="opacity" values="0;.95;.95;0" keyTimes="0;.15;.75;1" begin="${clock(passing > 0 ? passing : -(now % 1600))}" dur="1.6s" repeatCount="indefinite"/></path>`
+  } else if (!lookAbout) {
+    rest += brows(FLAT[0], FLAT[1], '1') + mouth(SMILE, '1')
+  }
+  out += windowed(rest, passing, napAt)
+
+  // Asleep: eyes shut, a calm mouth and a few z's drifting up.
+  if (napAt !== Infinity) {
+    let asleep = eyes.map(e => `<path d="M${n1(e.x - 3.6)} ${n1(e.y)}Q${n1(e.x)} ${n1(e.y + 2.6)} ${n1(e.x + 3.6)} ${n1(e.y)}" fill="none" stroke="${SKIN.brow}" stroke-width="1.4" stroke-linecap="round"/>`).join('')
+    asleep += mouth(`M${CX - 2.5} ${CY - 0.5}Q${CX} ${CY + 1} ${CX + 2.5} ${CY - 0.5}`, '1')
+    const zs: [number, number, number][] = [[CX + 19, CY - 22, 9], [CX + 25, CY - 31, 11], [CX + 32, CY - 41, 13]]
+    zs.forEach(([zx, zy, size], k) => {
+      const pulseAt = napAt > 0 ? napAt + k * 700 : -((now + k * 700) % 2800)
+      const anim = isStill ? '' : `<animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.7;1" begin="${clock(pulseAt)}" dur="2.8s" repeatCount="indefinite"/>`
+      asleep += `<text x="${zx}" y="${zy}" ${FONT} font-size="${size}" fill="${c0.bone}" opacity="${isStill ? '.8' : '0'}">${anim}z</text>`
+    })
+    out += windowed(asleep, napAt, Infinity)
+  }
+  return out
+}
+
+/** Set by drawMap for the pilot's words: the palette of the drawing being made. */
+let c0: Palette = DARK
+
+/** The UFO: glass, the pilot inside, the saucer over the pilot's middle, and lights round the rim. */
+function ship(mood: Mood, now: number, isStill: boolean, isBusy: boolean, core: string, targets: Point[], c: Palette): string {
+  let out = ''
+  // The glass behind the pilot.
+  out += `<circle cx="${CX}" cy="${CY + 6}" r="30" fill="#14233f" opacity=".85"/>`
+  out += pilot(mood, now, isStill, targets)
+  // The glass in front: a faint tint and a curved glint.
+  out += `<circle cx="${CX}" cy="${CY + 6}" r="30" fill="#9fd4ff" opacity=".08"/>`
+  out += `<path d="M${CX - 22} ${CY - 6}Q${CX - 17} ${CY - 19} ${CX - 6} ${CY - 22}" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" opacity=".4"/>`
+  out += `<circle cx="${CX}" cy="${CY + 6}" r="30" fill="none" stroke="#c7e6ff" stroke-width="1" opacity=".45"/>`
+  // The saucer: hull, deck and its band.
+  out += `<ellipse cx="${CX}" cy="${CY + 19}" rx="34" ry="7.5" fill="#596276"/>`
+  out += `<ellipse cx="${DECK.x}" cy="${DECK.y}" rx="${DECK.rx}" ry="${DECK.ry}" fill="#a4adc2"/>`
+  out += `<ellipse cx="${DECK.x}" cy="${DECK.y - 2.5}" rx="${DECK.rx - 8}" ry="${DECK.ry - 4}" fill="#c3cad9"/>`
+  out += `<ellipse cx="${DECK.x}" cy="${DECK.y}" rx="${DECK.rx}" ry="${DECK.ry}" fill="none" stroke="#6f788c" stroke-width="1"/>`
+  // Its name along the front of the deck.
+  out += `<text x="${CX}" y="${CY + 16.5}" text-anchor="middle" ${FONT} font-size="6.5" letter-spacing="1.2" fill="#3b4254">${escapeXml(core)}</text>`
+  // Lights round the rim: they chase while work runs and glow softly at rest.
+  const LIGHTS = 9
+  const lap = isBusy ? 1200 : 3600
+  for (let k = 0; k < LIGHTS; k++) {
+    const a = Math.PI * 0.08 + (Math.PI * 0.84 * k) / (LIGHTS - 1)
+    const lx = DECK.x - DECK.rx * 0.9 * Math.cos(a)
+    const ly = DECK.y + DECK.ry * 0.62 * Math.sin(a) + 1
+    const hue = k % 3 === 0 ? SKIN.main : k % 3 === 1 ? '#ffd166' : '#7fe0d3'
+    if (isStill) {
+      out += `<circle cx="${n1(lx)}" cy="${n1(ly)}" r="1.7" fill="${hue}" opacity=".85"/>`
+    } else {
+      const chase = `begin="${clock(-((now + (k * lap) / LIGHTS) % lap))}" dur="${clock(lap)}" repeatCount="indefinite"`
+      out += `<circle cx="${n1(lx)}" cy="${n1(ly)}" r="1.7" fill="${hue}" opacity=".35"><animate attributeName="opacity" values="1;.25;.25;1" keyTimes="0;.3;.85;1" ${chase}/></circle>`
+    }
+  }
+  // The pilot's bubble: ? while it waits on you, ! for a while after something went wrong.
+  const bubble = (sign: string, color: string): string =>
+    `<circle cx="${CX + 27}" cy="${CY - 28}" r="8.5" fill="${c.raised}" stroke="${color}" stroke-width="1.2"/>` +
+    `<text x="${CX + 27}" y="${CY - 24}" text-anchor="middle" ${FONT} font-size="13" fill="${color}">${sign}</text>`
+  if (mood.isAsking) out += bubble('?', '#ffd166')
+  else if (mood.startledFor > 0) out += windowed(bubble('!', c.red), 0, mood.startledFor)
+  // An answer gets a little shower of sparkles.
+  if (mood.cheerFor > 0 && !mood.isAsking && mood.startledFor <= 0 && !isStill) {
+    const spots: [number, number][] = [[-34, -26], [36, -18], [-40, 2], [30, -36], [-20, -40], [44, 4]]
+    let sparkles = ''
+    spots.forEach(([dx, dy], k) => {
+      const s = 3.4
+      const twinkle = `begin="${clock(-((now + k * 230) % 1400))}" dur="1.4s" repeatCount="indefinite"`
+      sparkles += `<path d="M${n1(CX + dx)} ${n1(CY + dy - s)}L${n1(CX + dx)} ${n1(CY + dy + s)}M${n1(CX + dx - s)} ${n1(CY + dy)}L${n1(CX + dx + s)} ${n1(CY + dy)}" fill="none" stroke="#ffd166" stroke-width="1.4" stroke-linecap="round" opacity="0"><animate attributeName="opacity" values="0;1;0" ${twinkle}/></path>`
+    })
+    out += windowed(sparkles, 0, mood.cheerFor)
+  }
+  return out
+}
+
+/**
+ * The ship drawn at its own size, made SHIP times bigger about the centre: every place, length and outline. The ship
+ * uses absolute M, L, Q and Z outlines only, so its numbers come in pairs.
+ */
+function enlarged(svg: string): string {
+  const k = SHIP
+  const px = (v: string): string => n1(CX + (Number(v) - CX) * k)
+  const py = (v: string): string => n1(CY + (Number(v) - CY) * k)
+  const pairs = (d: string): string => {
+    let isX = true
+    return d.replace(/-?\d+(\.\d+)?/g, v => {
+      const out = isX ? px(v) : py(v)
+      isX = !isX
+      return out
+    })
+  }
+  return svg
+    .replace(/ (cx|x|x1|x2)="(-?[\d.]+)"/g, (_, a: string, v: string) => ` ${a}="${px(v)}"`)
+    .replace(/ (cy|y|y1|y2)="(-?[\d.]+)"/g, (_, a: string, v: string) => ` ${a}="${py(v)}"`)
+    .replace(/ (r|rx|ry|stroke-width|font-size|letter-spacing)="(-?[\d.]+)"/g, (_, a: string, v: string) => ` ${a}="${n1(Number(v) * k)}"`)
+    .replace(/ (d|path)="([^"]*)"/g, (_, a: string, d: string) => ` ${a}="${pairs(d)}"`)
+    .replace(/attributeName="r" values="([^"]*)"/g, (_, v: string) => `attributeName="r" values="${v.split(';').map(x => n1(Number(x) * k)).join(';')}"`)
+    .replace(/transform="translate\((-?[\d.]+) (-?[\d.]+)\)"/g, (_, x: string, y: string) => `transform="translate(${px(x)} ${py(y)})"`)
+}
+
+// ---- the whole map ------------------------------------------------------------------------------
+
+export function drawMap(board: Board, now: number, setup: Setup): string {
+  // Space is dark whatever the theme; a person's own colors still take the places they name.
+  const c: Palette = { ...DARK, ...setup.colors }
+  c0 = c
+  const shift = setup.layout === 'you-bottom' ? STATIONS.length / 2 : 0
+  const recent = board.entries.slice(-40)
+  const isStill = setup.motion === 'reduced'
+  const flights = isStill ? [] : recent.filter(e => now - e.startedAt < ROCKET_MS).slice(-14)
+  const returns = isStill ? [] : recent.filter(e => e.endedAt !== undefined && e.from !== 'inbound' && now - e.endedAt < ROCKET_MS).slice(-14)
+  const beams = recent.filter(e => now - e.startedAt < GLOW_MS / 2).slice(-10)
+  const running = recent.filter(e => e.status === 'run')
+  const anyRunning = running.length > 0
+  const agentsAt = place(indexOf('agents'), shift)
+  const isBad = (e: Entry): boolean => e.status === 'block' || e.status === 'err'
+  const targets = STATIONS.map((_, i) => place(i, shift))
+
+  let body = ''
+  if (setup.background !== 'transparent') {
+    const isOwnGround = c.ground !== DARK.ground
+    body += `<rect width="${W}" height="${H}" rx="12" fill="${isOwnGround ? c.ground : SPACE}"/>`
+    // Two faint clouds of gas far behind everything; a ground of the person's own is left plain.
+    if (!isOwnGround) body += `<circle cx="96" cy="88" r="92" fill="#3a2a7a" opacity=".16"/><circle cx="380" cy="350" r="110" fill="#1d4a6e" opacity=".16"/>`
+  }
+
+  // Stars: the same every drawing, a few of them twinkling.
+  const rnd = seeded(20261115)
+  for (let k = 0; k < 80; k++) {
+    const sx = rnd() * W
+    const sy = rnd() * H
+    const r = 0.35 + rnd() * 0.9
+    const o = 0.25 + rnd() * 0.6
+    if (k % 7 === 0 && !isStill) {
+      const dur = 2200 + Math.floor(rnd() * 3000)
+      body += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="${n1(r + 0.25)}" fill="#ffffff" opacity="${n1(o)}"><animate attributeName="opacity" values="${n1(o)};.08;${n1(o)}" begin="${clock(-(now % dur))}" dur="${clock(dur)}" repeatCount="indefinite"/></circle>`
+    } else {
+      body += `<circle cx="${n1(sx)}" cy="${n1(sy)}" r="${n1(r)}" fill="#ffffff" opacity="${n1(o)}"/>`
+    }
+  }
+
+  // Lanes from the ship to each planet, worn in with use: by the end of a session the map shows where the work went.
   STATIONS.forEach((s, i) => {
     const p = place(i, shift)
-    const a = edge(core, p, HUB)
-    const b = edge(p, core, NODE)
+    const a = rim(p)
+    const b = edge(p, a, NODE + 3)
     const worn = Math.min(1, Math.log2(1 + (board.counts[s.id] ?? 0)) / 7)
-    const line = `<line x1="${n1(a.x)}" y1="${n1(a.y)}" x2="${n1(b.x)}" y2="${n1(b.y)}" stroke-width="${n1(1 + 2.6 * worn)}" stroke-linecap="round"`
-    body += `${line} stroke="${c.spoke}"/>`
-    if (worn > 0) body += `${line} stroke="${s.id === 'memory' ? c.mem : c.accent}" opacity="${n1(worn * 0.55)}"/>`
+    const line = `x1="${n1(a.x)}" y1="${n1(a.y)}" x2="${n1(b.x)}" y2="${n1(b.y)}" stroke-linecap="round"`
+    body += `<line ${line} stroke="${c.spoke === DARK.spoke ? '#1d2643' : c.spoke}" stroke-width="1" stroke-dasharray="2 5"/>`
+    if (worn > 0) body += `<line ${line} stroke="${LOOKS[s.id].accent}" stroke-width="${n1(0.8 + 2.2 * worn)}" opacity="${n1(0.12 + worn * 0.4)}"/>`
   })
 
   const scene: Scene = { entries: recent, board, now, c, names: setup.t.stations, isStill, shift }
@@ -280,90 +834,101 @@ export function drawMap(board: Board, now: number, setup: Setup): string {
   body += drawn.map(d => d.under).join('')
   body += trail(recent, now, c, isStill, shift)
 
-  /** The two ends of an entry's spoke: where it starts (the core or the agents station) and its own station. */
+  /** Where an entry's trip starts (the ship, or the agents planet for a subagent's call) and where it docks. */
   const ends = (e: Entry): [Point, Point] => {
     const p = place(indexOf(e.station), shift)
-    const start = e.from === 'agents' ? agentsAt : core
-    return [edge(start, p, e.from === 'agents' ? NODE : HUB), edge(p, start, NODE)]
+    const start = e.from === 'agents' ? agentsAt : rim(p)
+    const a = e.from === 'agents' ? edge(agentsAt, p, NODE + 6) : start
+    return [a, edge(p, start, NODE + 8)]
   }
-  /** Pulses that share a spoke and a moment fly in lanes, five apart. */
   const lane = (list: Entry[], e: Entry): number => {
     const peers = list.filter(x => x.station === e.station && x.from === e.from)
-    return (peers.indexOf(e) - (peers.length - 1) / 2) * 5
+    return (peers.indexOf(e) - (peers.length - 1) / 2) * 9
   }
 
   for (const e of beams) {
     const [a, b] = ends(e)
-    body += beam(a, b, isBad(e) ? c.red : tone(e)[0], now - e.startedAt, e.from === 'inbound')
+    const color = isBad(e) ? c.red : LOOKS[e.station].accent
+    body +=
+      `<line x1="${n1(a.x)}" y1="${n1(a.y)}" x2="${n1(b.x)}" y2="${n1(b.y)}" stroke="${color}" stroke-width="1.2"${e.from === 'inbound' ? ' stroke-dasharray="3 4"' : ''} opacity="0">` +
+      `<animate attributeName="opacity" values=".55;0" begin="${clock(-(now - e.startedAt))}" dur="${clock(GLOW_MS / 2)}" fill="freeze"/></line>`
+  }
+
+  body += drawn.map(d => d.body).join('')
+
+  // Rockets parked at planets whose call still runs, once their outward trip is over.
+  const parkedAt = new Set<StationId>()
+  for (const e of running) {
+    if (e.from === 'inbound' || parkedAt.has(e.station)) continue
+    if (!isStill && now - e.startedAt < ROCKET_MS) continue
+    parkedAt.add(e.station)
+    const p = place(indexOf(e.station), shift)
+    body += docked(p, e.from === 'agents' ? agentsAt : { x: SAUCER.x, y: SAUCER.y }, LOOKS[e.station].accent)
   }
   for (const e of flights) {
     const [a, b] = aside(...ends(e), lane(flights, e))
     const age = now - e.startedAt
-    const color = e.status === 'block' ? c.red : tone(e)[1]
-    if (e.from === 'inbound') {
-      body += pulse(b, a, color, age, 3.8, true) + ripple(core, HUB - 2, color, age)
-    } else {
-      body += pulse(a, b, color, age, 3.8) + ripple(place(indexOf(e.station), shift), NODE, color, age)
-    }
+    if (e.from === 'inbound') body += spark(b, a, LOOKS[e.station].accent, age)
+    else body += rocket(a, b, LOOKS[e.station].accent, age, e.status === 'block')
   }
   for (const e of returns) {
     const [a, b] = aside(...ends(e), lane(returns, e))
-    body += pulse(b, a, e.status === 'ok' ? c.ash : c.red, now - (e.endedAt as number), 2.6)
+    body += rocket(b, a, LOOKS[e.station].accent, now - (e.endedAt as number), e.status !== 'ok')
   }
 
   body += drawn.map(d => d.over).join('')
 
-  // Each subagent still at work circles the agents station.
+  // Each subagent still at work is a small moon circling the agents planet.
   const crew = (board.agents ?? []).slice(0, 6)
   crew.forEach((_, k) => {
     const lap = 7000
     const spin = `${n1(agentsAt.x)} ${n1(agentsAt.y)}`
-    // Standing still, each keeps its own place on the circle.
+    const moon = `<circle cx="${n1(agentsAt.x)}" cy="${n1(agentsAt.y - NODE - 7)}" r="3.2" fill="#d9d4e6"/>`
     if (isStill) {
-      body += `<g transform="rotate(${n1((360 * k) / crew.length)} ${spin})"><circle cx="${n1(agentsAt.x)}" cy="${n1(agentsAt.y - NODE - 6)}" r="3" fill="${c.hot}"/></g>`
+      body += `<g transform="rotate(${n1((360 * k) / crew.length)} ${spin})">${moon}</g>`
       return
     }
     body +=
       `<g><animateTransform attributeName="transform" type="rotate" from="0 ${spin}" to="360 ${spin}" begin="${clock(-((now + (k * lap) / crew.length) % lap))}" dur="${clock(lap)}" repeatCount="indefinite"/>` +
-      `<circle cx="${n1(agentsAt.x)}" cy="${n1(agentsAt.y - NODE - 6)}" r="3" fill="${c.hot}"/></g>`
+      `${moon}</g>`
   })
 
-  // A name longer than three letters shrinks to stay inside the circle.
-  const coreSize = Math.min(17, 62 / (0.75 * setup.core.length))
-
-  // The core breathes at rest and quickens while something runs.
-  const period = anyRunning ? 1600 : 4800
-  const breath = `begin="${clock(-(now % period))}" dur="${clock(period)}" repeatCount="indefinite"`
-  body +=
-    (isStill
-      ? `<circle cx="${CX}" cy="${CY}" r="${CORE + 8}" fill="${c.accent}" opacity="${anyRunning ? '.16' : '.08'}"/>`
-      : `<circle cx="${CX}" cy="${CY}" r="${CORE + 6}" fill="${c.accent}" opacity=".08">` +
-        `<animate attributeName="r" values="${CORE + 3};${CORE + 13};${CORE + 3}" ${breath}/>` +
-        `<animate attributeName="opacity" values=".05;${anyRunning ? '.24' : '.12'};.05" ${breath}/></circle>`) +
-    `<circle cx="${CX}" cy="${CY}" r="${CORE}" fill="${c.raised}" stroke="${anyRunning ? c.accent : c.line}" stroke-width="1.3"/>`
-
-  // The context window as a ring around the core: it fills as the session goes and empties at a compaction.
+  // The context window as a ring around the ship: it fills as the session goes and empties at a compaction.
   if (board.context !== undefined) {
     const full = Math.max(0, Math.min(100, Math.round(board.context)))
-    const ring = `cx="${CX}" cy="${CY}" r="${CORE + 5}" fill="none" stroke-width="2.2"`
+    const ring = `cx="${CX}" cy="${CY}" r="${RING}" fill="none" stroke-width="2.4"`
     body +=
-      `<circle ${ring} stroke="${c.line}" opacity=".7"/>` +
-      `<circle ${ring} stroke="${full >= 90 ? c.red : full >= 70 ? c.accent : c.ash}" pathLength="100" stroke-dasharray="${full} 100" transform="rotate(-90 ${CX} ${CY})"/>` +
-      `<text x="${CX}" y="${CY - 19}" text-anchor="middle" ${FONT} font-size="8" fill="${c.dim}">${full}%</text>`
+      `<circle ${ring} stroke="${c.line}" opacity=".6"/>` +
+      `<circle ${ring} stroke="${full >= 90 ? c.red : full >= 70 ? '#ffd166' : '#7fe0a0'}" stroke-linecap="round" pathLength="100" stroke-dasharray="${full} 100" transform="rotate(-90 ${CX} ${CY})"/>` +
+      `<text x="${CX}" y="${CY - RING - 6}" text-anchor="middle" ${FONT} font-size="9" paint-order="stroke" stroke="${SPACE}" stroke-width="3" fill="${c.dim}">${full}%</text>`
   }
+
+  // The pilot's mood, from the board, as windows of time from now.
+  const lastAt = recent.length > 0 ? Math.max(...recent.map(e => e.endedAt ?? e.startedAt)) : undefined
+  const done = recent.filter(e => e.mark === 'done').pop()
+  const focusOn = running.filter(e => e.from !== 'inbound').pop()
+  const lastFault = recent.filter(e => isBad(e) && e.station !== 'you').map(e => e.endedAt ?? e.startedAt)
+  const mood: Mood = {
+    isWorried: (board.context ?? 0) >= 80,
+    isAsking: running.some(e => e.station === 'you'),
+    startledFor: lastFault.length > 0 ? Math.max(...lastFault) + ALARM_MS - now : 0,
+    cheerFor: done !== undefined && !anyRunning ? done.startedAt + CHEER_MS - now : 0,
+    napAt: !anyRunning && lastAt !== undefined ? lastAt + NAP_MS - now : Infinity,
+    focus: focusOn === undefined ? undefined : place(indexOf(focusOn.station), shift),
+  }
+  body += enlarged(ship(mood, now, isStill, anyRunning, setup.core, targets, c))
 
   const switchAge = board.switchedAt === undefined ? Infinity : now - board.switchedAt
   const isSwitching = switchAge >= 0 && switchAge < SWITCH_MS
-  body += `<text x="${CX}" y="${CY + (board.model === undefined ? 6 : 1)}" text-anchor="middle" ${FONT} font-size="${n1(coreSize)}" letter-spacing="${n1(coreSize * 0.147)}" fill="${c.bone}">${escapeXml(setup.core)}</text>`
   if (board.model !== undefined) {
-    body += `<text x="${CX}" y="${CY + 17}" text-anchor="middle" ${FONT} font-size="9" fill="${isSwitching ? c.hot : c.ash}">${escapeXml(shortModel(board.model))}</text>`
+    body += `<text x="${CX}" y="${CY + 56}" text-anchor="middle" ${FONT} font-size="9.5" paint-order="stroke" stroke="${SPACE}" stroke-width="3" fill="${isSwitching ? c.hot : c.ash}">${escapeXml(shortModel(board.model))}</text>`
   }
 
-  // A changed model rings at the core and at its station for a few seconds.
+  // A changed model rings at the ship and at Jupiter for a few seconds.
   if (isSwitching && !isStill) {
     const model = place(indexOf('model'), shift)
     const laps = Math.ceil((SWITCH_MS - switchAge) / 1600)
-    for (const [p, r] of [[core, CORE], [model, NODE]] as const) {
+    for (const [p, r] of [[{ x: CX, y: CY }, 54], [model, NODE]] as const) {
       const ringing = `begin="${clock(-(switchAge % 1600))}" dur="1.6s" repeatCount="${laps}" fill="freeze"`
       body +=
         `<circle cx="${n1(p.x)}" cy="${n1(p.y)}" r="${r}" fill="none" stroke="${c.bone}" stroke-width="1.4" opacity="0">` +
@@ -372,18 +937,17 @@ export function drawMap(board: Board, now: number, setup: Setup): string {
     }
   }
 
-  // The answer leaves the core as one wide ring.
-  const done = recent.filter(e => e.mark === 'done').pop()
+  // The answer leaves the ship as one wide ring.
   if (done !== undefined && now - done.startedAt < DONE_MS && !isStill) {
     const leaving = `begin="${clock(done.startedAt - now)}" dur="${clock(DONE_MS)}" fill="freeze"`
     body +=
-      `<circle cx="${CX}" cy="${CY}" r="${CORE}" fill="none" stroke="${c.bone}" stroke-width="1.6" opacity="0">` +
-      `<animate attributeName="r" values="${CORE};${CORE + 38}" ${leaving}/>` +
+      `<circle cx="${CX}" cy="${CY}" r="58" fill="none" stroke="${c.bone}" stroke-width="1.6" opacity="0">` +
+      `<animate attributeName="r" values="58;${RING + 30}" ${leaving}/>` +
       `<animate attributeName="opacity" values=".6;0" ${leaving}/></circle>`
   }
 
   // Twice the viewBox, so the picture fills whatever room the pane gives it.
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W * 2}" height="${H * 2}">${setup.theme === 'auto' ? lightRules(setup.colors) : ''}${body}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W * 2}" height="${H * 2}">${body}</svg>`
 }
 
 function escapeXml(text: string): string {

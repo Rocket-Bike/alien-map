@@ -2,7 +2,7 @@
 ./register.tsx hooks: classic.PreToolUse
 ./register.tsx hooks: classic.SessionStart
 ./register.tsx hooks: classic.UserPromptSubmit
-./register.tsx hooks: command.run{command=lot-map}
+./register.tsx hooks: command.run{command=alien-map}
 ./register.tsx hooks: prompt.submit
 ./register.tsx hooks: session.compact
 ./register.tsx hooks: session.start
@@ -11,7 +11,7 @@
 ./register.tsx hooks: turn.complete
 ./register.tsx hooks: turn.start
 ./register.tsx hooks: turn.step
-./register.tsx hooks: ui.render{component=Pane, requestId=lot-map}
+./register.tsx hooks: ui.render{component=Pane, requestId=alien-map}
 ./register.tsx calls: $.clock.after
 ./register.tsx calls: $.clock.now
 ./register.tsx calls: $.command.register
@@ -27,5 +27,5 @@
 ./register.tsx calls: $.ui.resolve
 ./register.tsx env writes: nothing
 ./register.tsx env reads: COLORFGBG
-./register.tsx state writes: lot-map.board
-./register.tsx state reads: lot-map.board
+./register.tsx state writes: alien-map.board
+./register.tsx state reads: alien-map.board

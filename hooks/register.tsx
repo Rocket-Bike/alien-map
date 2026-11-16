@@ -6,8 +6,12 @@ import { MAP_ASPECT, STATIONS, classify, clean, describeNow, drawMap, firstLine,
 import type { Setup } from './map'
 import { drawTerminalMap, terminalMap } from './terminal'
 
-const PANE = 'lot-map'
+const PANE = 'alien-map'
 const KEEP = 80
+/** The headings of the two columns under the map. */
+const ACTIVITY = 'Activity'
+const MODELS = 'Models'
+const MODELS_NONE = 'none yet'
 /** A label longer than this may not fit a docked pane, so its row gets a control that opens it. */
 const LONG_LABEL = 28
 /** The least the time takes at the end of a row, so that short times line up: `107 ms`. A longer one widens its own row. */
@@ -22,7 +26,7 @@ const CREW_NAMES = 32
 const ZOOMS = [160, 200, 240, 280, 340, 400]
 
 // Change the tag when a field of Entry or Board changes: it declines what an earlier version stored.
-const board = atom({ plugin: 'lot-map', key: 'board' } as const, { entries: [], counts: {} } as Board, { shape: 'board-3' })
+const board = atom({ plugin: 'alien-map', key: 'board' } as const, { entries: [], counts: {} } as Board, { shape: 'board-4' })
 
 const newId = (now: number): string => `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`
 
@@ -42,6 +46,8 @@ type Start = {
   status?: Status
   agentId?: string
   mark?: Entry['mark']
+  /** For a model step: the model's short name, counted in the models column. */
+  model?: string
   /** Adds nothing to the station's count: a second view of something already counted. */
   uncounted?: boolean
   startedAt?: number
@@ -72,12 +78,14 @@ async function begin($: EngineInterface, start: Start): Promise<string | undefin
       ...(start.status !== undefined ? { endedAt: start.endedAt ?? now } : {}),
       ...(start.agentId !== undefined ? { agentId: start.agentId } : {}),
       ...(start.mark !== undefined ? { mark: start.mark } : {}),
+      ...(start.model !== undefined ? { model: start.model } : {}),
     }
     await update($, board, b => ({
       ...b,
       ...start.patch,
       entries: kept([...b.entries, entry]),
       counts: start.uncounted ? b.counts : { ...b.counts, [entry.station]: (b.counts[entry.station] ?? 0) + 1 },
+      ...(entry.model !== undefined && !start.uncounted ? { models: { ...b.models, [entry.model]: (b.models?.[entry.model] ?? 0) + 1 } } : {}),
       // What a hook brought to memory unasked is counted apart from what was asked for.
       ...(entry.station === 'memory' && entry.from === 'inbound' && !start.uncounted ? { pushed: (b.pushed ?? 0) + 1 } : {}),
       // An interrupted turn lands on the person's own station and is no fault of anything.
@@ -186,7 +194,7 @@ export const register: Register = (on, options) => {
   const above = terminalMap(setup)
 
   on('session.start', async ($, e, next) => {
-    await quietly(() => $.command.register({ name: 'lot-map', description: t.command }))
+    await quietly(() => $.command.register({ name: 'alien-map', description: t.command }))
     void quietly(() => $.ui.open({ id: PANE, title: t.title }))
     await quietly(async () => {
       const minimized = (await $.store.get('paneMin')) === true
@@ -202,7 +210,7 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'lot-map' }, async $ => {
+  on('command.run', { command: 'alien-map' }, async $ => {
     const opened = await $.ui.open({ id: PANE, title: t.title })
     return { text: opened.isPlaced ? t.opened : t.cannotOpen(String(opened.reason)) }
   })
@@ -264,6 +272,7 @@ export const register: Register = (on, options) => {
       station: 'model',
       label: `${shortModel(e.model)} · ${t.step(e.index + 1)}${isMain ? '' : ` · ${crew.get(e.agentId ?? '') ?? t.subagent}`}`,
       from: isMain ? 'core' : 'agents',
+      model: shortModel(e.model),
       ...(isMain ? { patch: { model: e.model, step: e.index + 1 } } : { agentId: e.agentId }),
     })
     try {
@@ -446,6 +455,46 @@ export const register: Register = (on, options) => {
       )
     })
     const feed = rows.length > 0 ? rows : [<Text dimColor>{t.nothingYet}</Text>]
+
+    // Beside the rows, the models: every model that took a step this session, how many it took, lit while one runs.
+    const busyModels = new Set(state.entries.filter(x => x.status === 'run' && x.model !== undefined).map(x => x.model))
+    const models = Object.entries(state.models ?? {}).sort((a, b) => b[1] - a[1])
+    const modelRows =
+      models.length > 0
+        ? models.map(([name, steps]) => {
+            const isOn = busyModels.has(name)
+            return (
+              <Box flexDirection="row" gap={1} alignItems="flex-start">
+                <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                  <Text mono size={size} color={isOn ? 'claude' : undefined} dimColor={!isOn} wrap="truncate-end">
+                    {`${isOn ? '●' : '·'} ${name}`}
+                  </Text>
+                </Box>
+                <Box flexShrink={0}>
+                  <Text mono tabular size={size} color={isOn ? 'claude' : undefined} dimColor={!isOn}>
+                    {String(steps)}
+                  </Text>
+                </Box>
+              </Box>
+            )
+          })
+        : [<Text mono size={size} dimColor>{MODELS_NONE}</Text>]
+    const panel = (
+      <Box flexDirection="row" gap={2} alignItems="flex-start">
+        <Box flexDirection="column" flexGrow={3} flexShrink={1} minWidth={0}>
+          <Text mono size={size} dimColor>
+            {ACTIVITY}
+          </Text>
+          {feed}
+        </Box>
+        <Box flexDirection="column" flexGrow={1} flexShrink={0} minWidth={16}>
+          <Text mono size={size} dimColor>
+            {MODELS}
+          </Text>
+          {modelRows}
+        </Box>
+      </Box>
+    )
     // What runs now at the left, cut if it must be. Where there is no drawing to say them, the context and the model
     // stand at the right, whole; beside the drawing they would be said a second time.
     const now2 = nowParts(state, t)
@@ -479,6 +528,7 @@ export const register: Register = (on, options) => {
           {map !== undefined ? [map] : []}
           {current}
           <Text dimColor>{tally === '' ? t.noCounts : tally}</Text>
+          {models.length > 0 ? [<Text dimColor>{`${MODELS}: ${models.map(([name, steps]) => `${busyModels.has(name) ? '●' : ''}${name} ${steps}`).join(' · ')}`}</Text>] : []}
           {feed}
         </Box>
       )
@@ -504,7 +554,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {map}
           {current}
-          {feed}
+          {panel}
         </Box>
       )
     }
@@ -522,7 +572,7 @@ export const register: Register = (on, options) => {
           <Button key="zoom-in" plain dimColor label={t.zoomIn} onPress={() => quietly(() => setView($, { zoom: zoomStep(zoom, 1) }))} />
           <Button key="hide" plain dimColor label={t.hideMap} onPress={() => quietly(() => setView($, { minimized: true }))} />
         </Box>
-        {feed}
+        {panel}
       </Box>
     )
   })
