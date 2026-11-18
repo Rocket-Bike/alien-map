@@ -8,20 +8,15 @@ Built on [lot-map](https://github.com/alexeyw/lot-map) by Aleksei Volodin (MIT).
 
 ## Install
 
-From a shell, with this folder on your computer:
-
 ```bash
-claude plugin marketplace add /path/to/alien-map
+claude plugin marketplace add Rocket-Bike/alien-map
 claude plugin install alien-map@alien-map
 ```
 
-Then start a new session. The pane opens by itself. If it doesn't, type `/alien-map`.
+Then start a new session in the Claude desktop app. The map opens by itself every session; type `/alien-map` if you close it. The install may say some options are not set: they are all optional, and the defaults are fine.
 
-To try it for one session without installing:
-
-```bash
-claude --plugin-dir /path/to/alien-map
-```
+* Turn it off: `claude plugin disable alien-map`
+* Get updates: `claude plugin update alien-map@alien-map`
 
 If you also have lot-map installed, disable one of them. Both watch the same hooks.
 
